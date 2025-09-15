@@ -11,7 +11,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # ---------- USER SETTINGS ----------
-CSV_PATH = "case_features_gsr.csv"  # change if saved elsewhere
+CSV_PATH = "../case_features_gsr.csv"  # change if saved elsewhere
 SAVE_FIGS = True  # also save PNGs next to the CSV
 
 
