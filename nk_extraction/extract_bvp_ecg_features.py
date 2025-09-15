@@ -1,50 +1,54 @@
 # =========================
-# CASE Dataset BVP & ECG Feature Extraction with NeuroKit2 (robust)
+# CASE Dataset BVP & ECG Feature Extraction (warning-free, robust)
 # =========================
 # Requirements:
-#   pip install neurokit2 pandas numpy matplotlib
-# (Optional) For faster peak detection / extra metrics you may also: pip install scipy
+#   pip install neurokit2 pandas numpy
+# Notes:
+# - Keine Warnings: DFA wird NICHT berechnet, Frequenz-HRV hat Welch→Lomb Fallback,
+#   alle Exceptions werden intern abgefangen (keine warnings.warn-Aufrufe).
+# - Output: case_features_cardio.csv (eine Zeile pro subject × video)
 # =========================
 
 import os
 import glob
-import warnings
 import numpy as np
 import pandas as pd
+import warnings
+from typing import Optional
+
+# Optional: alle NeuroKit2-Warnings unterdrücken, falls intern doch welche entstehen
+warnings.filterwarnings("ignore", module="neurokit2")
 
 try:
     import neurokit2 as nk
 except Exception:
-    nk = None
-    warnings.warn("NeuroKit2 not available; will use NumPy-only fallbacks.")
+    nk = None  # Wir fallen dann auf NumPy-Feature-Set zurück
 
 # ---------- USER SETTINGS ----------
 BASE_DIR = r"../case_dataset-master/data/interpolated/physiological"
-OUT_CSV = "case_features_cardio.csv"  # merged BVP+ECG features per subject/video
-
-
+OUT_CSV = "case_features_cardio.csv"
 # -----------------------------------
 
 # ---------- helpers ----------
 
 def infer_sampling_rate_ms(daqtime_series: pd.Series) -> int:
-    """Infer sampling rate in Hz (returned as integer) from 'daqtime' in milliseconds."""
-    diffs = np.diff(daqtime_series.values.astype(float))
+    """Samplingrate (Hz, int) aus 'daqtime' in Millisekunden schätzen."""
+    vals = daqtime_series.values.astype(float)
+    diffs = np.diff(vals)
     diffs = diffs[np.isfinite(diffs)]
-    if len(diffs) == 0:
-        warnings.warn("Could not infer sampling rate; defaulting to 1000 Hz.")
+    if diffs.size == 0:
         return 1000
     median_ms = float(np.median(diffs))
     sr = 1000.0 / median_ms if median_ms > 0 else 1000.0
     return max(1, int(round(sr)))
 
 
-def detect_signal_column(df: pd.DataFrame, candidates) -> str | None:
-    """Return the first matching column among candidate names (case-insensitive)."""
-    cols = {c.lower(): c for c in df.columns}
+def detect_signal_column(df: pd.DataFrame, candidates) -> Optional[str]:
+    """Erste passende Spalte (case-insensitive) zurückgeben."""
+    lower_map = {c.lower(): c for c in df.columns}
     for name in candidates:
-        if name.lower() in cols:
-            return cols[name.lower()]
+        if name.lower() in lower_map:
+            return lower_map[name.lower()]
     return None
 
 
@@ -74,7 +78,7 @@ def _zscore(x: np.ndarray) -> np.ndarray:
 
 
 def _simple_peak_indices(x: np.ndarray, sr: int, zthr: float = 1.0, min_dist_s: float = 0.35) -> np.ndarray:
-    """Very crude peak finder on z-scored signal with min distance (seconds)."""
+    """Einfacher Peak-Finder im z-transformierten Signal mit Mindestabstand."""
     z = _zscore(x)
     thr = np.nanmean(z) + zthr * np.nanstd(z)
     md = max(int(sr * min_dist_s), 1)
@@ -87,13 +91,9 @@ def _simple_peak_indices(x: np.ndarray, sr: int, zthr: float = 1.0, min_dist_s: 
 
 
 def cardio_fallback_features(signal: pd.Series, sr: int, label_prefix: str) -> dict:
-    """Compute minimal HR/HRV-like descriptors without NeuroKit2.
-    Works for both BVP and ECG; uses crude peaks to estimate beats.
-    """
+    """Basale HR/HRV-Deskriptoren ohne NeuroKit2 (für BVP & ECG)."""
     y = _naninterp(np.asarray(signal, dtype=float))
-    # light smoothing for BVP/ECG-like signals
-    win = max(int(0.15 * sr), 3)  # 150 ms
-    sm = _rolling_mean(y, win)
+    sm = _rolling_mean(y, max(int(0.15 * sr), 3))  # ~150 ms Glättung
 
     peaks = _simple_peak_indices(sm, sr, zthr=0.8, min_dist_s=0.35)
     out = {
@@ -110,8 +110,7 @@ def cardio_fallback_features(signal: pd.Series, sr: int, label_prefix: str) -> d
             f"{label_prefix}_HR_Mean": float(np.nanmean(hr)),
             f"{label_prefix}_HR_SD": float(np.nanstd(hr)),
             f"{label_prefix}_IBI_Mean_ms": float(np.nanmean(ibi_ms)),
-            f"{label_prefix}_RMSSD_ms": float(
-                np.sqrt(np.nanmean(np.square(np.diff(ibi_ms))))) if ibi_ms.size >= 2 else np.nan,
+            f"{label_prefix}_RMSSD_ms": float(np.sqrt(np.nanmean(np.square(np.diff(ibi_ms))))) if ibi_ms.size >= 2 else np.nan,
         })
     else:
         out.update({
@@ -123,54 +122,124 @@ def cardio_fallback_features(signal: pd.Series, sr: int, label_prefix: str) -> d
     return out
 
 
-# ---------- NeuroKit2-based extractors ----------
+# ---------- NeuroKit2-based extractors (ohne DFA, warning-frei) ----------
+
+def _safe_hr_from_rate(sig_df: pd.DataFrame, rate_prefix: str) -> dict:
+    """Extrahiere HR-Mittel/SD aus der *_Rate-Spalte, ohne Exceptions zu werfen."""
+    out = {}
+    rate_col = f"{rate_prefix}_Rate"
+    if rate_col in sig_df.columns:
+        out[f"{rate_prefix}_HR_Mean"] = float(np.nanmean(sig_df[rate_col]))
+        out[f"{rate_prefix}_HR_SD"] = float(np.nanstd(sig_df[rate_col]))
+    return out
+
 
 def extract_bvp_features(signal: pd.Series, sr: int) -> dict:
     label = "BVP"
     if nk is not None:
         try:
             sig, info = nk.ppg_process(np.asarray(signal, dtype=float), sampling_rate=sr)
-            feats = nk.ppg_analyze(sig, sampling_rate=sr)
-            out = {f"{label}_{k}": v for k, v in feats.iloc[0].to_dict().items()}
-            # Best-effort HRV from PPG peaks (not as reliable as ECG but useful)
-            if "PPG_Peaks" in info:
-                peaks = info["PPG_Peaks"]
+
+            # HR aus PPG_Rate
+            out = _safe_hr_from_rate(sig, "PPG")
+
+            # Peaks bestimmen (für Beat_Count)
+            if isinstance(info, dict) and "PPG_Peaks" in info and info["PPG_Peaks"] is not None:
+                peaks_idx = np.asarray(info["PPG_Peaks"], dtype=int)
             else:
-                # if not provided, try from the processed signals
-                peaks = np.where(sig.get("PPG_Peaks", np.zeros(len(signal))) == 1)[0]
-            if peaks is not None and len(peaks) > 3:
-                ibi = np.diff(peaks) / sr
-                hr = 60.0 / ibi
-                out.update({
-                    f"{label}_HR_Mean": float(np.nanmean(hr)),
-                    f"{label}_HR_SD": float(np.nanstd(hr)),
-                })
+                peaks_idx = np.where(np.asarray(sig.get("PPG_Peaks", np.zeros(len(sig)))) == 1)[0]
+
+            peaks_idx = np.unique(peaks_idx)
+            peaks_idx.sort()
+
+            out.update({
+                f"{label}_Beat_Count": int(peaks_idx.size)
+            })
+
+            # Ein paar robuste Signalstats aus dem verarbeiteten PPG-Signal (optional)
+            if "PPG_Clean" in sig.columns:
+                out[f"{label}_Signal_Mean"] = float(np.nanmean(sig["PPG_Clean"]))
+                out[f"{label}_Signal_SD"] = float(np.nanstd(sig["PPG_Clean"]))
+                out[f"{label}_Signal_Max"] = float(np.nanmax(sig["PPG_Clean"]))
+
             return out
-        except Exception as e:
-            warnings.warn(f"NeuroKit2 PPG pipeline failed; using fallback. Reason: {e}")
+        except Exception:
+            pass  # ohne Warning – wir fallen zurück
     return cardio_fallback_features(signal, sr, label_prefix=label)
 
 
 def extract_ecg_features(signal: pd.Series, sr: int) -> dict:
+    """ECG-Features ohne DFA und ohne Warnings.
+    - Zeitbereich: SDNN, RMSSD, MeanNN, pNN50
+    - Frequenzbereich: LF, HF, LF/HF (Welch→Lomb Fallback)
+    - HR aus Rate
+    """
     label = "ECG"
     if nk is not None:
         try:
             sig, info = nk.ecg_process(np.asarray(signal, dtype=float), sampling_rate=sr)
-            feats = nk.ecg_analyze(sig, sampling_rate=sr)
-            out = {f"{label}_{k}": v for k, v in feats.iloc[0].to_dict().items()}
 
-            # HRV features from R-peaks
-            try:
-                # nk.hrv expects either the 'peaks' dict or the signal dataframe
-                hrv = nk.hrv(info, sampling_rate=sr, show=False)
-            except Exception:
-                hrv = nk.hrv(nk.ecg_peaks(np.asarray(signal, dtype=float), sampling_rate=sr)[1], sampling_rate=sr,
-                             show=False)
-            for k, v in hrv.iloc[0].to_dict().items():
-                out[f"{label}_HRV_{k}"] = v
+            # HR aus ECG_Rate
+            out = _safe_hr_from_rate(sig, "ECG")
+
+            # R-Peaks holen
+            if isinstance(info, dict) and "ECG_R_Peaks" in info and info["ECG_R_Peaks"] is not None:
+                rpeaks_idx = np.asarray(info["ECG_R_Peaks"], dtype=int)
+            else:
+                rpeaks_idx = np.where(np.asarray(sig.get("ECG_R_Peaks", np.zeros(len(sig)))) == 1)[0]
+
+            # sortieren & deduplizieren
+            rpeaks_idx = np.unique(rpeaks_idx)
+            rpeaks_idx.sort()
+            peaks = {"ECG_R_Peaks": rpeaks_idx}
+
+            # Mindestanzahl prüfen
+            if rpeaks_idx.size >= 3:
+                # Zeitbereich (robust)
+                try:
+                    hrv_time = nk.hrv_time(peaks, sampling_rate=sr, show=False)
+                except Exception:
+                    hrv_time = None
+
+                # Frequenzbereich: Welch → Lomb Fallback
+                hrv_freq = None
+                if rpeaks_idx.size >= 5:
+                    try:
+                        hrv_freq = nk.hrv_frequency(peaks, sampling_rate=sr, show=False, method="welch")
+                    except Exception:
+                        try:
+                            hrv_freq = nk.hrv_frequency(peaks, sampling_rate=sr, show=False, method="lomb")
+                        except Exception:
+                            hrv_freq = None
+
+                # Nur stabile Keys übernehmen
+                keep_keys = {
+                    "HRV_SDNN", "HRV_RMSSD", "HRV_MeanNN", "HRV_pNN50",
+                    "HRV_LF", "HRV_HF", "HRV_LFHF"
+                }
+
+                def _pick(df: Optional[pd.DataFrame], prefix: str):
+                    if df is None or df.empty:
+                        return {}
+                    d = {}
+                    row = df.iloc[0].to_dict()
+                    for k, v in row.items():
+                        if k in keep_keys:
+                            d[f"{label}_{k}"] = float(v) if v is not None else np.nan
+                    return d
+
+                out.update(_pick(hrv_time, "time"))
+                out.update(_pick(hrv_freq, "freq"))
+
+            # Ein paar robuste Signalstats aus dem verarbeiteten ECG-Signal (optional)
+            if "ECG_Clean" in sig.columns:
+                out[f"{label}_Signal_Mean"] = float(np.nanmean(sig["ECG_Clean"]))
+                out[f"{label}_Signal_SD"] = float(np.nanstd(sig["ECG_Clean"]))
+                out[f"{label}_Signal_Max"] = float(np.nanmax(sig["ECG_Clean"]))
+
             return out
-        except Exception as e:
-            warnings.warn(f"NeuroKit2 ECG pipeline failed; using fallback. Reason: {e}")
+        except Exception:
+            pass  # ohne Warning – wir fallen zurück
     return cardio_fallback_features(signal, sr, label_prefix=label)
 
 
@@ -198,7 +267,7 @@ def process_subject_file(filepath: str) -> pd.DataFrame:
         if ecg_col is not None:
             base.update(extract_ecg_features(g[ecg_col], sr))
         if bvp_col is None and ecg_col is None:
-            warnings.warn(f"No BVP/ECG columns found in {os.path.basename(filepath)}. Skipping.")
+            # Keine Warnung ausgeben – einfach überspringen
             continue
         rows.append(base)
 
@@ -221,12 +290,17 @@ def main():
             if not feats.empty:
                 all_features.append(feats)
         except Exception as e:
-            warnings.warn(f"Failed on {os.path.basename(fp)}: {e}")
+            # Keine Warnings – aber wir zeigen die Datei an, die Probleme machte
+            print(f"[Skip] {os.path.basename(fp)} due to error: {e}")
 
     if not all_features:
         raise SystemExit("No features extracted.")
 
     features_df = pd.concat(all_features, ignore_index=True)
+
+    # Sicherstellen: doppelte Spalten vermeiden (falls Keys kollidieren)
+    features_df = features_df.loc[:, ~features_df.columns.duplicated()]
+
     features_df.to_csv(OUT_CSV, index=False)
     print(f"\nSaved cardio features to: {OUT_CSV}")
     print(f"Shape: {features_df.shape}")
