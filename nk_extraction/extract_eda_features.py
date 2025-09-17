@@ -12,11 +12,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-try:
-    import neurokit2 as nk
-except Exception:
-    nk = None
-    warnings.warn("NeuroKit2 not available; will try NumPy fallback only.")
+import neurokit2 as nk
 
 # ---------- USER SETTINGS ----------
 BASE_DIR = r"../case_dataset-master/data/interpolated/physiological"
