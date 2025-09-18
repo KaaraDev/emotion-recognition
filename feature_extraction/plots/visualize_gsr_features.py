@@ -55,10 +55,10 @@ variances = video_means_all.var(axis=0).sort_values(ascending=False)
 radar_features = variances.index.tolist()[:3] if len(variances) >= 3 else variances.index.tolist()
 
 # Min–max normalization per feature to make shapes comparable
-video_means = video_means_all[radar_features]
+video_means = video_means_all[FEATURES]
 norm_means = (video_means - video_means.min()) / (video_means.max() - video_means.min() + 1e-12)
 
-angles = [n / float(len(radar_features)) * 2 * pi for n in range(len(radar_features))]
+angles = [n / float(len(FEATURES)) * 2 * pi for n in range(len(FEATURES))]
 angles += angles[:1]
 
 for v in sorted(df["video"].unique()):
@@ -71,7 +71,7 @@ for v in sorted(df["video"].unique()):
     ax = plt.subplot(111, polar=True)
     ax.plot(angles, values, linewidth=2)
     ax.fill(angles, values, alpha=0.25)
-    plt.xticks(angles[:-1], radar_features)
+    plt.xticks(angles[:-1], FEATURES)
     plt.title(f"GSR Radar (normalized) — Video {v}")
     save_current_fig(f"gsr_radar_normalized_video_{v}.png")
 

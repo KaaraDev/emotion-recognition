@@ -1,5 +1,5 @@
 # =========================
-# CASE Dataset – BVP Feature Extraction (NeuroKit2 only)
+# CASE Dataset – BVP Feature Extraction (NeuroKit2, minimal)
 # =========================
 # Requirements:
 #   pip install neurokit2 pandas numpy
@@ -10,21 +10,17 @@ import glob
 import numpy as np
 import pandas as pd
 from typing import Optional, Dict, List
-
-import neurokit2 as nk  # Hard requirement: NeuroKit2 must be installed
+import neurokit2 as nk
 
 # ---------- USER SETTINGS ----------
 BASE_DIR = r"../case_dataset-master/data/interpolated/physiological"
 OUT_CSV = "case_features_bvp.csv"
 
 
-# ---------- Helpers ----------
+# ---------- Small helpers ----------
 
 def infer_sampling_rate_ms(daqtime_series: pd.Series) -> int:
-    """
-    Estimate the sampling rate (Hz, integer) from a 'daqtime' column
-    given in milliseconds.
-    """
+    """Estimate sampling rate (Hz) from 'daqtime' column in milliseconds."""
     vals = daqtime_series.values.astype(float)
     diffs = np.diff(vals)
     diffs = diffs[np.isfinite(diffs)]
@@ -36,10 +32,7 @@ def infer_sampling_rate_ms(daqtime_series: pd.Series) -> int:
 
 
 def detect_signal_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
-    """
-    Find the first matching signal column in a dataframe (case-insensitive).
-    Useful for flexible column naming across datasets.
-    """
+    """Return first matching signal column name (case-insensitive)."""
     lower_map = {c.lower(): c for c in df.columns}
     for name in candidates:
         if name.lower() in lower_map:
@@ -47,57 +40,68 @@ def detect_signal_column(df: pd.DataFrame, candidates: List[str]) -> Optional[st
     return None
 
 
-def _safe_from_rate(sig_df: pd.DataFrame, rate_col: str) -> Dict[str, float]:
-    """
-    Extract HR mean and SD from a *_Rate column (if available).
-    Returns NaNs if the column is missing.
-    """
-    out: Dict[str, float] = {}
-    if rate_col in sig_df.columns:
-        out["BVP_HR_Mean"] = float(np.nanmean(sig_df[rate_col]))
-        out["BVP_HR_SD"] = float(np.nanstd(sig_df[rate_col]))
-    else:
-        out["BVP_HR_Mean"] = np.nan
-        out["BVP_HR_SD"] = np.nan
-    return out
-
-
-# ---------- Feature Extraction (NeuroKit2) ----------
+# ---------- Core feature extraction ----------
 
 def extract_bvp_features(signal: pd.Series, sr: int) -> Dict[str, float]:
     """
-    Extract robust BVP features using NeuroKit2:
-      - BVP_HR_Mean, BVP_HR_SD (from PPG_Rate)
-      - BVP_Beat_Count (number of detected peaks)
-      - BVP_Signal_Mean / SD / Max (from PPG_Clean)
+    Minimal, robust BVP features using NeuroKit2:
+      - HR (PPG_Rate): mean, sd, min, max
+      - Beat count
+      - IBI (sec): mean, sd   (SDNN analog)
+      - RMSSD (sec)
+      - pNN50 (%), threshold 50 ms
     """
     y = np.asarray(signal, dtype=float)
 
-    # Run NeuroKit2 preprocessing and peak detection
+    # NeuroKit2 processing
     sig, info = nk.ppg_process(y, sampling_rate=sr)
 
-    # HR statistics from PPG_Rate
-    out = _safe_from_rate(sig, "PPG_Rate")
+    out: Dict[str, float] = {
+        "BVP_HR_Mean": np.nan,
+        "BVP_HR_SD": np.nan,
+        "BVP_HR_Min": np.nan,
+        "BVP_HR_Max": np.nan,
+        "BVP_Beat_Count": 0,
+        "BVP_IBIsec_Mean": np.nan,
+        "BVP_IBIsec_SD": np.nan,
+        "BVP_PRV_RMSSD": np.nan,
+        "BVP_PRV_pNN50": np.nan,
+    }
 
-    # Beat count: prefer info dict, else fallback to binary peak vector
+    # HR features
+    if "PPG_Rate" in sig.columns:
+        hr = sig["PPG_Rate"].to_numpy(dtype=float)
+        hr = hr[np.isfinite(hr)]
+        if hr.size:
+            out["BVP_HR_Mean"] = float(np.nanmean(hr))
+            out["BVP_HR_SD"] = float(np.nanstd(hr))
+            out["BVP_HR_Min"] = float(np.nanmin(hr))
+            out["BVP_HR_Max"] = float(np.nanmax(hr))
+
+    # Peaks -> PRV
     if isinstance(info, dict) and "PPG_Peaks" in info and info["PPG_Peaks"] is not None:
         peaks_idx = np.asarray(info["PPG_Peaks"], dtype=int)
     else:
         peaks_idx = np.where(np.asarray(sig.get("PPG_Peaks", np.zeros(len(sig)))) == 1)[0]
-    peaks_idx = np.unique(peaks_idx)
+
+    peaks_idx = np.unique(peaks_idx[np.isfinite(peaks_idx)]).astype(int)
     peaks_idx.sort()
     out["BVP_Beat_Count"] = int(peaks_idx.size)
 
-    # Clean signal statistics (mean, SD, max)
-    if "PPG_Clean" in sig.columns:
-        clean = sig["PPG_Clean"].to_numpy(dtype=float)
-        out["BVP_Signal_Mean"] = float(np.nanmean(clean))
-        out["BVP_Signal_SD"] = float(np.nanstd(clean))
-        out["BVP_Signal_Max"] = float(np.nanmax(clean))
-    else:
-        out["BVP_Signal_Mean"] = np.nan
-        out["BVP_Signal_SD"] = np.nan
-        out["BVP_Signal_Max"] = np.nan
+    if sr > 0 and peaks_idx.size >= 2:
+        ibi_sec = np.diff(peaks_idx) / float(sr)
+        ibi_sec = ibi_sec[np.isfinite(ibi_sec)]
+        if ibi_sec.size:
+            out["BVP_IBIsec_Mean"] = float(np.nanmean(ibi_sec))
+            out["BVP_IBIsec_SD"] = float(np.nanstd(ibi_sec))
+
+            diff_ibi = np.diff(ibi_sec)
+            if diff_ibi.size:
+                rmssd = np.sqrt(np.nanmean(diff_ibi ** 2))
+                out["BVP_PRV_RMSSD"] = float(rmssd)
+
+                pnn50 = np.nanmean((np.abs(diff_ibi) > 0.050).astype(float)) * 100.0
+                out["BVP_PRV_pNN50"] = float(pnn50)
 
     return out
 
@@ -105,15 +109,9 @@ def extract_bvp_features(signal: pd.Series, sr: int) -> Dict[str, float]:
 # ---------- Per-file processing ----------
 
 def process_subject_file(filepath: str) -> pd.DataFrame:
-    """
-    Process a single subject file:
-      - Estimate sampling rate
-      - Detect BVP column
-      - Extract features per video segment
-    """
     df = pd.read_csv(filepath)
 
-    # Check required columns
+    # Required columns
     for col in ("daqtime", "video"):
         if col not in df.columns:
             raise ValueError(f"Missing column '{col}' in {os.path.basename(filepath)}")
@@ -121,25 +119,25 @@ def process_subject_file(filepath: str) -> pd.DataFrame:
     sr = infer_sampling_rate_ms(df["daqtime"])
     subj = os.path.splitext(os.path.basename(filepath))[0]
 
-    # Detect BVP column
+    # BVP column
     bvp_col = detect_signal_column(df, ["bvp", "ppg", "BVP", "PPG", "blood_volume_pulse"])
     if bvp_col is None:
-        return pd.DataFrame(columns=[
-            "subject", "video", "sampling_rate_hz",
-            "BVP_HR_Mean", "BVP_HR_SD", "BVP_Beat_Count",
-            "BVP_Signal_Mean", "BVP_Signal_SD", "BVP_Signal_Max"
-        ])
+        cols = ["subject", "video", "sampling_rate_hz",
+                "BVP_HR_Mean", "BVP_HR_SD", "BVP_HR_Min", "BVP_HR_Max",
+                "BVP_Beat_Count", "BVP_IBIsec_Mean", "BVP_IBIsec_SD",
+                "BVP_PRV_RMSSD", "BVP_PRV_pNN50"]
+        return pd.DataFrame(columns=cols)
 
     rows: List[Dict[str, float]] = []
     for vid, g in df.groupby("video"):
         g = g.reset_index(drop=True)
-        base: Dict[str, float] = {
+        feats = extract_bvp_features(g[bvp_col], sr)
+        rows.append({
             "subject": subj,
             "video": vid,
             "sampling_rate_hz": int(sr),
-        }
-        base.update(extract_bvp_features(g[bvp_col], sr))
-        rows.append(base)
+            **feats
+        })
 
     return pd.DataFrame(rows)
 
@@ -152,22 +150,22 @@ def main():
     if not files:
         raise SystemExit(f"No files found in {BASE_DIR} (pattern: sub_*.csv).")
 
-    all_features: List[pd.DataFrame] = []
+    out_frames: List[pd.DataFrame] = []
     for fp in files:
         print(f"Processing {os.path.basename(fp)} ...")
         try:
             feats = process_subject_file(fp)
             if not feats.empty:
-                all_features.append(feats)
+                out_frames.append(feats)
             else:
                 print(f"[Skip] {os.path.basename(fp)}: no BVP column found.")
         except Exception as e:
             print(f"[Skip] {os.path.basename(fp)} due to error: {e}")
 
-    if not all_features:
+    if not out_frames:
         raise SystemExit("No BVP features extracted.")
 
-    features_df = pd.concat(all_features, ignore_index=True)
+    features_df = pd.concat(out_frames, ignore_index=True)
     features_df = features_df.loc[:, ~features_df.columns.duplicated()]
     features_df.to_csv(OUT_CSV, index=False)
 
