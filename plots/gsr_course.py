@@ -1,6 +1,6 @@
 # GSR (EDA) over time with video shading — Subject 1
-# Legend: chronological order by segment; Baseline moved to the end.
-# Colors: Emotion 1 & Emotion 2 share the same color.
+# Colors match emotion timeline: same hues per category.
+# Emotion 1 & 2 share same color family.
 
 import pandas as pd
 import numpy as np
@@ -8,11 +8,12 @@ import matplotlib.pyplot as plt
 from textwrap import wrap
 from pathlib import Path
 import matplotlib.patches as mpatches
+import colorsys  # for lightness adjustments
 
 # --------------------------
 # CONFIG
 # --------------------------
-PATH_PHYSIO = "../case_dataset-master/data/interpolated/physiological/sub_1.csv"  # <-- change if needed
+PATH_PHYSIO = "../case_dataset-master/data/interpolated/physiological/sub_17.csv"  # change if needed
 
 video_map = {
     1: "Amusement 1",
@@ -27,6 +28,33 @@ video_map = {
     11: "Pause",
     12: "End",
 }
+
+# ---------------------------------------
+# Shared color scheme (same as emotion timeline)
+# ---------------------------------------
+base_colors = {
+    "Amusement": "orange",
+    "Boredom": "violet",
+    "Relaxation": "green",
+    "Scary": "red",
+    "Start": "tab:grey",
+    "Pause": "tab:blue",
+    "End": "tab:grey",
+}
+
+variant_lightness = {
+    1: 0.8,  # darker
+    2: 1.35,  # lighter
+}
+
+
+def adjust_lightness(color, factor=1.0):
+    """Adjust color brightness: factor <1 = darker, >1 = lighter"""
+    import matplotlib.colors as mcolors
+    r, g, b = mcolors.to_rgb(color)
+    h, l, s = colorsys.rgb_to_hls(r, g, b)
+    l = max(0, min(1, l * factor))
+    return colorsys.hls_to_rgb(h, l, s)
 
 
 # --------------------------
@@ -48,11 +76,16 @@ def ms_or_s_to_minutes(arr):
 
 
 def category_from_label(label: str) -> str:
-    """Collapse 'Amusement 1/2' → 'Amusement', etc.; keep Baseline/Start/End."""
-    base = label.split()[0]  # first word (Amusement/Boredom/Relaxation/Scary/Baseline/Start/End)
+    base = label.split()[0]
     if base in {"Amusement", "Boredom", "Relaxation", "Scary"}:
         return base
-    return label  # Baseline / Start / End remain as-is
+    return label  # Start / Pause / End
+
+
+def get_variant_index(label: str) -> int:
+    import re
+    m = re.search(r"\b(\d+)\b", label)
+    return int(m.group(1)) if m else 1
 
 
 # --------------------------
@@ -87,28 +120,12 @@ if len(vids):
             start_idx = i
     segments.append((t_min[start_idx], t_min[-1], vids[-1]))
 
-# Map IDs → labels and categories (for same-color 1/2)
+# Map IDs → labels and categories
 labeled_segments = []
 for st, en, vid in segments:
     label = video_map.get(int(vid), str(vid))
     cat = category_from_label(label)
     labeled_segments.append((st, en, label, cat))
-
-# --------------------------
-# Color mapping by CATEGORY
-# --------------------------
-# All "Amusement 1/2" share a color, etc.
-color_cycle = plt.rcParams['axes.prop_cycle'].by_key().get('color', [])
-if not color_cycle:
-    color_cycle = ["#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f", "#edc948", "#b07aa1", "#ff9da7", "#9c755f",
-                   "#bab0ab"]
-
-categories_in_order = []
-for _, _, _, cat in labeled_segments:
-    if cat not in categories_in_order:
-        categories_in_order.append(cat)
-
-cat_color = {cat: color_cycle[i % len(color_cycle)] for i, cat in enumerate(categories_in_order)}
 
 # --------------------------
 # Plot
@@ -117,27 +134,26 @@ plt.figure(figsize=(14, 6))
 plt.plot(t_min, gsr, label="GSR (EDA)", color="black", alpha=0.85)
 plt.xlabel("Time [minutes]")
 plt.ylabel("GSR (µS)")
-plt.title("Subject 1 — GSR (EDA) over time with video segments")
+plt.title("Subject 17 — GSR (EDA) over time with video segments")
 
-# Shade segments
+# Shade segments (same color logic)
 for st, en, label, cat in labeled_segments:
     if en > st:
-        plt.axvspan(st, en, alpha=0.15, facecolor=cat_color[cat])
+        var_idx = get_variant_index(label)
+        base = base_colors.get(cat, "tab:purple")
+        shade = adjust_lightness(base, variant_lightness.get(var_idx, 1.0))
+        plt.axvspan(st, en, alpha=0.15, facecolor=shade)
 
 # --------------------------
-# Legend: chronological order; Baseline last
+# Legend: chronological order
 # --------------------------
 handles = []
-baseline_handles = []
 for st, en, label, cat in labeled_segments:
-    patch = mpatches.Patch(alpha=0.3, facecolor=cat_color[cat], label="\n".join(wrap(label, width=42)))
-    if label.startswith("Baseline"):
-        baseline_handles.append(patch)
-    else:
-        handles.append(patch)
-
-# Append Baseline entries at the end (if any)
-handles.extend(baseline_handles)
+    var_idx = get_variant_index(label)
+    base = base_colors.get(cat, "tab:purple")
+    shade = adjust_lightness(base, variant_lightness.get(var_idx, 1.0))
+    patch = mpatches.Patch(alpha=0.3, facecolor=shade, label="\n".join(wrap(label, width=42)))
+    handles.append(patch)
 
 plt.legend(handles=handles, title="Played video", loc="upper right", framealpha=0.95)
 
