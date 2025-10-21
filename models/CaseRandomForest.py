@@ -238,10 +238,10 @@ if __name__ == "__main__":
     prep = CaseDataPreprocessor(
         base_path=base_path,
         fs=20,
-        window_size=10,
-        step_size=1,
-        subjects=list(range(1, 29)),
-        label_shift_s=0.0,
+        window_size=7,
+        step_size=3,
+        subjects=list(range(1, 31)),
+        label_shift_s=1.0,
         use_video_as_feature=False,
     )
 
