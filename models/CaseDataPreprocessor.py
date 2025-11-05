@@ -582,7 +582,7 @@ if __name__ == "__main__":
         base_path=base_path,
         window_size=60,
         step_size=60,
-        subjects=list(range(1, 31)),
+        subjects=list(range(30, 31)),
         label_shift_s=0.0,
         use_video_as_feature=False,
         normalize_video_lengths=False,

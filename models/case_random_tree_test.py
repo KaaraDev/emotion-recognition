@@ -99,9 +99,137 @@ class AdaptiveSMOTE(BaseSampler):
 # ---------------------------------------------------------
 
 PHYS_FEATURES = [
-    'bvp_bpm', 'bvp_ibi', 'bvp_sdnn', 'bvp_sdsd', 'bvp_rmssd', 'bvp_pnn20', 'bvp_pnn50',
-    'bvp_mad', 'bvp_sd1', 'bvp_sd2', 'bvp_s', 'bvp_sd1sd2', 'bvp_breathingrate',
-    'gsr_mean', 'gsr_slope', 'skt_mean', 'skt_slope'
+    "ecg_mean",
+    "ecg_std",
+    "ecg_min",
+    "ecg_max",
+    "ecg_slope_per_s",
+    "ecg_rate_mean",
+    "ecg_rate_std",
+    "ecg_HRV_MeanNN",
+    "ecg_HRV_SDNN",
+    "ecg_HRV_RMSSD",
+    "ecg_HRV_SDSD",
+    "ecg_HRV_CVNN",
+    "ecg_HRV_CVSD",
+    "ecg_HRV_MedianNN",
+    "ecg_HRV_MadNN",
+    "ecg_HRV_MCVNN",
+    "ecg_HRV_IQRNN",
+    "ecg_HRV_SDRMSSD",
+    "ecg_HRV_Prc20NN",
+    "ecg_HRV_Prc80NN",
+    "ecg_HRV_pNN50",
+    "ecg_HRV_pNN20",
+    "ecg_HRV_MinNN",
+    "ecg_HRV_MaxNN",
+    "ecg_HRV_HTI",
+    "ecg_HRV_TINN",
+    "ecg_HRV_LF",
+    "ecg_HRV_HF",
+    "ecg_HRV_VHF",
+    "ecg_HRV_TP",
+    "ecg_HRV_LFHF",
+    "ecg_HRV_LFn",
+    "ecg_HRV_HFn",
+    "ecg_HRV_LnHF",
+    "bvp_mean",
+    "bvp_std",
+    "bvp_min",
+    "bvp_max",
+    "bvp_slope_per_s",
+    "ppg_rate_mean",
+    "ppg_rate_std",
+    "gsr_mean",
+    "gsr_std",
+    "gsr_min",
+    "gsr_max",
+    "gsr_slope_per_s",
+    "eda_SCR_Peaks_N",
+    "eda_SCR_Peaks_Amplitude_Mean",
+    "eda_EDA_Tonic_SD",
+    "eda_EDA_Autocorrelation",
+    "eda_tonic_mean",
+    "eda_phasic_mean",
+    "rsp_mean",
+    "rsp_std",
+    "rsp_min",
+    "rsp_max",
+    "rsp_slope_per_s",
+    "rsp_RSP_Rate_Mean",
+    "rsp_RRV_RMSSD",
+    "rsp_RRV_MeanBB",
+    "rsp_RRV_SDBB",
+    "rsp_RRV_SDSD",
+    "rsp_RRV_CVBB",
+    "rsp_RRV_CVSD",
+    "rsp_RRV_MedianBB",
+    "rsp_RRV_MadBB",
+    "rsp_RRV_MCVBB",
+    "rsp_RRV_LF",
+    "rsp_RRV_HF",
+    "rsp_RRV_LFHF",
+    "rsp_RRV_SD1",
+    "rsp_RRV_SD2",
+    "rsp_RRV_SD2SD1",
+    "rsp_RRV_ApEn",
+    "rsp_RRV_SampEn",
+    "rsp_RAV_Mean",
+    "rsp_RAV_SD",
+    "rsp_RAV_RMSSD",
+    "rsp_RAV_CVSD",
+    "rsp_RSP_RVT",
+    "rsp_RSP_Symmetry_PeakTrough",
+    "rsp_RSP_Symmetry_RiseDecay",
+    "rsp_RSP_Phase_Duration_Inspiration",
+    "rsp_RSP_Phase_Duration_Expiration",
+    "rsp_RSP_Phase_Duration_Ratio",
+    "rsp_rate_mean",
+    "rsp_rate_std",
+    "emg_zygo_mean",
+    "emg_zygo_std",
+    "emg_zygo_min",
+    "emg_zygo_max",
+    "emg_zygo_slope_per_s",
+    "emg_coru_mean",
+    "emg_coru_std",
+    "emg_coru_min",
+    "emg_coru_max",
+    "emg_coru_slope_per_s",
+    "emg_trap_mean",
+    "emg_trap_std",
+    "emg_trap_min",
+    "emg_trap_max",
+    "emg_trap_slope_per_s",
+    "skt_mean",
+    "skt_std",
+    "skt_min",
+    "skt_max",
+    "skt_slope_per_s",
+    "ecg_diff_mean",
+    "ecg_diff_std",
+    "ecg_pos_diff_ratio",
+    "bvp_diff_mean",
+    "bvp_diff_std",
+    "bvp_pos_diff_ratio",
+    "gsr_diff_mean",
+    "gsr_diff_std",
+    "gsr_pos_diff_ratio",
+    "rsp_diff_mean",
+    "rsp_diff_std",
+    "rsp_pos_diff_ratio",
+    "skt_diff_mean",
+    "skt_diff_std",
+    "skt_pos_diff_ratio",
+    "emg_zygo_diff_mean",
+    "emg_zygo_diff_std",
+    "emg_zygo_pos_diff_ratio",
+    "emg_coru_diff_mean",
+    "emg_coru_diff_std",
+    "emg_coru_pos_diff_ratio",
+    "emg_trap_diff_mean",
+    "emg_trap_diff_std",
+    "emg_trap_pos_diff_ratio",
 ]
 
 VIDEO_TO_LABEL = {
@@ -164,12 +292,12 @@ def make_logger() -> logging.Logger:
 
 class VideoLabelEvaluator:
     def __init__(
-        self,
-        model_path: Path,
-        df_full: pd.DataFrame,
-        subjects_to_test: List[int],
-        out_dir: Path,
-        logger: logging.Logger = None
+            self,
+            model_path: Path,
+            df_full: pd.DataFrame,
+            subjects_to_test: List[int],
+            out_dir: Path,
+            logger: logging.Logger = None
     ):
         """
         model_path:
@@ -433,6 +561,20 @@ def parse_args():
 # ---------------------------------------------------------
 # main
 # ---------------------------------------------------------
+def load_any_table(path: Path) -> pd.DataFrame:
+    path = Path(path)
+    suffix = path.suffix.lower()
+
+    # .parquet lesen
+    if suffix == ".parquet":
+        return pd.read_parquet(path)
+
+    # .csv oder .gz -> csv
+    if suffix in [".csv", ".gz"]:
+        return pd.read_csv(path)
+
+    # Fallback: versuch csv
+    return pd.read_csv(path, encoding="utf-8", errors="replace")
 
 if __name__ == "__main__":
     args = parse_args()
@@ -442,7 +584,12 @@ if __name__ == "__main__":
     out_dir = Path(args.out_dir)
     subjects = [int(s) for s in args.subjects]
 
-    df_full = pd.read_csv(csv_path)
+    # 🔧 hier statt pd.read_csv(...)
+    df_full = load_any_table(csv_path)
+
+    # CASE-Output hat oft 'video', dein Evaluator erwartet 'video_id'
+    if "video_id" not in df_full.columns and "video" in df_full.columns:
+        df_full = df_full.rename(columns={"video": "video_id"})
 
     evaluator = VideoLabelEvaluator(
         model_path=model_path,
