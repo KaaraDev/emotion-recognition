@@ -724,7 +724,7 @@ def parse_args() -> TrainConfig:
     )
     ap.add_argument('--csv', required=True,
                     help='Pfad zur Feature-CSV (braucht subject, video_id, phys-Features)')
-    ap.add_argument('--out_dir', default='outputs/rf_video_labels',
+    ap.add_argument('--out_dir', default='outputs_10w1s/rf_video_labels',
                     help='Ausgabeordner')
     ap.add_argument('--seed', type=int, default=42, help='Random Seed')
     ap.add_argument('--log_level', default='INFO',

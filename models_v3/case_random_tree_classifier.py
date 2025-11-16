@@ -1,4 +1,4 @@
-# train_rf_from_case_combined.py
+# train_rf_from_case_features.py
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,8 +20,14 @@ from sklearn.metrics import (
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import QuantileTransformer
 from sklearn.ensemble import RandomForestClassifier
+
 from imblearn.pipeline import Pipeline as ImbPipeline
 from imblearn.over_sampling import SVMSMOTE, BorderlineSMOTE
+from imblearn.base import BaseSampler
+from sklearn.base import clone
+from numbers import Integral
+from sklearn.utils._param_validation import Interval
+
 import joblib
 
 
@@ -34,7 +40,7 @@ class TrainCfg:
     random_state: int = 42
     log_level: str = "INFO"
 
-    # welche Videos raus?
+    # Pausen-Videos raus?
     exclude_pauses: bool = True
     # SMOTE Variante
     smote_variant: str = "svm"  # "svm" oder "borderline"
@@ -45,8 +51,9 @@ class TrainCfg:
     # GroupKFold folds
     n_folds: int = 5
     # bored (3/4) etwas runterstutzen
-    downsample_bored: bool = False
+    downsample_bored: bool = True
     bored_target: str = "median"  # "min" oder "median"
+    # optional: auf bestimmte Klassen beschränken (z.B. ["scary", "amused"])
     classes_to_keep: List[str] | None = None
 
 
@@ -90,12 +97,7 @@ def setup_logger(out_dir: Path, level: str = "INFO") -> logging.Logger:
     return logger
 
 
-# ------------------- Adaptive SMOTE wie bei dir -------------------
-
-from imblearn.base import BaseSampler
-from sklearn.base import clone
-from numbers import Integral
-from sklearn.utils._param_validation import Interval
+# ------------------- Adaptive SMOTE -------------------
 
 class AdaptiveSMOTE(BaseSampler):
     """
@@ -123,7 +125,6 @@ class AdaptiveSMOTE(BaseSampler):
         import numpy as np
         y_arr = np.asarray(y)
 
-        # 1) zu wenig Klassen -> nichts tun
         classes, counts = np.unique(y_arr, return_counts=True)
         if classes.size < 2:
             self._disabled_ = True
@@ -131,13 +132,11 @@ class AdaptiveSMOTE(BaseSampler):
             return X, y
 
         min_count = int(counts.min())
-        # 2) kleinste Klasse hat nur 1 Sample -> nichts tun
         if min_count <= 1:
             self._disabled_ = True
             self._effective_smote_ = None
             return X, y
 
-        # 3) k so wählen, dass es zur kleinsten Klasse passt
         max_k = max(1, min_count - 1)
         k = max(1, min(self.min_k, max_k))
 
@@ -197,15 +196,15 @@ def build_pipeline(cfg: TrainCfg) -> ImbPipeline:
     return ImbPipeline(steps=steps)
 
 
-
 # ------------------- Daten laden -------------------
 
-META_COLS = {"subject", "start_s", "end_s", "video"}
-LABEL_COLS = {"label_valence", "label_arousal"}
+# Meta-Spalten in DEINER Feature-CSV
+META_COLS = {"subject", "window_start_ms", "window_end_ms", "video_id"}
+LABEL_COLS = {"arousal", "valence"}  # kontinuierlich, hier nicht für Klassifikation genutzt
 
 
-def load_case_combined(path: Path, logger: logging.Logger) -> pd.DataFrame:
-    logger.info("Lade Features aus %s ...", path)
+def load_features(path: Path, logger: logging.Logger) -> pd.DataFrame:
+    logger.info("Lade Feature-CSV aus %s ...", path)
     if path.suffix.endswith("gz") or path.suffix.endswith("csv"):
         df = pd.read_csv(path)
     elif path.suffix == ".parquet":
@@ -217,25 +216,25 @@ def load_case_combined(path: Path, logger: logging.Logger) -> pd.DataFrame:
 
 
 def attach_labels(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> pd.DataFrame:
-    if "video" not in df.columns:
-        raise ValueError("Spalte 'video' wird für das Mapping benötigt (steht in deinem combined drin).")
+    if "video_id" not in df.columns:
+        raise ValueError("Spalte 'video_id' wird für das Mapping benötigt (kommt aus feature_extraction.py).")
+    if "subject" not in df.columns:
+        raise ValueError("Spalte 'subject' fehlt – wird für GroupKFold gebraucht.")
+
     df = df.copy()
 
-    # Pausen raus
+    # Pausen rauswerfen
     if cfg.exclude_pauses:
         before = len(df)
-        df = df.loc[~df["video"].isin(EXCLUDE_VIDEO_IDS)]
+        df = df.loc[~df["video_id"].isin(EXCLUDE_VIDEO_IDS)]
         logger.info("Pausen (10/11/12) entfernt: %d -> %d", before, len(df))
 
-    # Video -> Label
-    df["label"] = df["video"].map(VIDEO_TO_LABEL)
+    # Video-ID (numerisch) -> Label
+    df["label"] = df["video_id"].map(VIDEO_TO_LABEL)
     before_map = len(df)
     df = df[df["label"].notna()].copy()
     logger.info("Video->Label Mapping angewendet. Unmapped gedroppt: %d -> %d", before_map, len(df))
 
-    # sanity
-    if "subject" not in df.columns:
-        raise ValueError("Spalte 'subject' fehlt – wird für GroupKFold gebraucht.")
     return df
 
 
@@ -260,7 +259,9 @@ def downsample_class(df: pd.DataFrame, cls: str, cfg: TrainCfg, logger: logging.
 
     df_major = df[df["label"] != cls]
     df_minor = df[df["label"] == cls].sample(n=target_n, random_state=cfg.random_state)
-    out = pd.concat([df_major, df_minor], axis=0).sample(frac=1.0, random_state=cfg.random_state).reset_index(drop=True)
+    out = pd.concat([df_major, df_minor], axis=0).sample(
+        frac=1.0, random_state=cfg.random_state
+    ).reset_index(drop=True)
     logger.info("Nach Downsampling: %s", out["label"].value_counts().to_dict())
     return out
 
@@ -297,7 +298,6 @@ def run_group_cv(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> Dic
         logger.info("Fold %d/%d: acc=%.4f | bAcc=%.4f | f1_macro=%.4f",
                     fold, cfg.n_folds, acc, bacc, f1m)
 
-        # Confusion für den Fold speichern
         cm_labels = sorted(np.unique(np.concatenate([y[va_idx], y_hat])))
         cm = confusion_matrix(y[va_idx], y_hat, labels=cm_labels)
         cm_df = pd.DataFrame(cm, index=cm_labels, columns=cm_labels)
@@ -329,7 +329,6 @@ def run_group_cv(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> Dic
     logger.info("== Pooled results over all folds ==")
     logger.info("acc=%.4f | bAcc=%.4f | f1_macro=%.4f", acc_all, bacc_all, f1m_all)
 
-    # pooled confusion
     labels_sorted = sorted(np.unique(np.concatenate([all_true, all_pred])))
     cm_all = confusion_matrix(all_true, all_pred, labels=labels_sorted)
     pd.DataFrame(cm_all, index=labels_sorted, columns=labels_sorted) \
@@ -361,20 +360,38 @@ def run_group_cv(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> Dic
 
 
 def refit_final(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger, feat_cols: List[str]):
+    # X und y vorbereiten
     X_all = df[feat_cols].to_numpy(dtype=float)
     y_all = df["label"].to_numpy()
 
     pipe = build_pipeline(cfg)
     pipe.fit(X_all, y_all)
 
-    # Feature Importance vom RF
     rf = pipe.named_steps["rf"]
-    imp_df = pd.DataFrame({
-        "feature": feat_cols,
-        "importance": rf.feature_importances_
-    }).sort_values("importance", ascending=False)
-    imp_df.to_csv(cfg.out_dir / "feature_importance.csv", index=False)
 
+    importances = rf.feature_importances_
+    n_feat = len(feat_cols)
+    n_imp = len(importances)
+
+    if n_feat != n_imp:
+        logger.warning(
+            "Längen-Mismatch bei Feature Importances: len(feat_cols)=%d, len(importances)=%d. "
+            "Schneide auf das Minimum zu.",
+            n_feat, n_imp
+        )
+        n = min(n_feat, n_imp)
+        feat_cols_use = feat_cols[:n]
+        importances_use = importances[:n]
+    else:
+        feat_cols_use = feat_cols
+        importances_use = importances
+
+    imp_df = pd.DataFrame({
+        "feature": feat_cols_use,
+        "importance": importances_use
+    }).sort_values("importance", ascending=False)
+
+    imp_df.to_csv(cfg.out_dir / "feature_importance.csv", index=False)
     joblib.dump(pipe, cfg.out_dir / "final_model_pipeline.joblib")
     logger.info("Finales Modell gespeichert nach %s", cfg.out_dir / "final_model_pipeline.joblib")
 
@@ -382,13 +399,17 @@ def refit_final(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger, feat_co
 # ------------------- main -------------------
 
 if __name__ == "__main__":
-    base_csv = Path("features_case_60w30s/combined.csv.gz")
+    # HIER deinen Pfad zur Feature-CSV aus feature_extraction.py eintragen:
+    base_csv = Path("outputs/features_case_bvp_gsr_skt.csv")
 
+    # Beispiel: mehrere 2-Klassen-Experimente wie vorher
     experiments = [
-        ("scary_vs_amused",  ["scary", "amused"]),
+        ("scary_vs_amused", ["scary", "amused"]),
         ("bored_vs_relaxed", ["bored", "relaxed"]),
-        ("scary_vs_bored",   ["scary", "bored"]),
-        ("amused_vs_bored",  ["amused", "bored"]),
+        ("scary_vs_bored", ["scary", "bored"]),
+        ("amused_vs_bored", ["amused", "bored"]),
+        # Oder alle 4 Klassen:
+        ("all_four", ["scary", "amused", "bored", "relaxed"]),
     ]
 
     for exp_name, classes in experiments:
@@ -396,7 +417,7 @@ if __name__ == "__main__":
 
         cfg = TrainCfg(
             csv_path=base_csv,
-            out_dir=Path(f"outputs_60w30s/{exp_name}"),
+            out_dir=Path(f"rf_outputs/{exp_name}"),
             random_state=42,
             classes_to_keep=classes,
         )
@@ -406,7 +427,7 @@ if __name__ == "__main__":
 
         logger = setup_logger(cfg.out_dir, cfg.log_level)
 
-        df = load_case_combined(cfg.csv_path, logger)
+        df = load_features(cfg.csv_path, logger)
         df = attach_labels(df, cfg, logger)
 
         # Nur die Klassen für dieses Experiment behalten
@@ -431,4 +452,3 @@ if __name__ == "__main__":
             json.dump(feat_cols, f, indent=2)
 
         logger.info("Experiment %s fertig.", exp_name)
-

@@ -462,7 +462,7 @@ class CaseRandomForestClassifier:
 
     def load_prepared_from_dir(
         self,
-        features_dir: str = "features_case",
+        features_dir: str = "features_case_10w1s",
         combined_basename: str = "combined",
         prefer_parquet: bool = True,
     ) -> Tuple[pd.DataFrame, np.ndarray, pd.DataFrame]:
@@ -556,7 +556,7 @@ if __name__ == "__main__":
 
     print("[INFO] Lade gespeicherte Features …")
     X, y, meta = clfw.load_prepared_from_dir(
-        features_dir="features_case",     # ggf. Pfad anpassen
+        features_dir="features_case_10w1s",     # ggf. Pfad anpassen
         combined_basename="combined",     # falls du anders benannt hast
         prefer_parquet=True               # auf False setzen, wenn kein pyarrow installiert
     )

@@ -1,22 +1,29 @@
 # -*- coding: utf-8 -*-
 """
-Feature-Extraktion für das CASE-Dataset (Masterarbeit-kompatibel) – ROBUST
-==========================================================================
+Feature-Extraktion für das CASE-Dataset (Masterarbeit-kompatibel)
+=================================================================
 
-• 17 physiologische Fenster-Features (BVP/GSR/SKT)
-• Optional: kontinuierliche Annotationen (arousal, valence) pro Fenster gemittelt
-• Meta: subject, window_start_ms, window_end_ms, video_id (falls vorhanden)
+Liefert:
+- 17 physiologische Fenster-Features (BVP/GSR/SKT)
+- optional: kontinuierliche Annotationen (arousal, valence) pro Fenster gemittelt
+- Meta: subject, window_start_ms, window_end_ms, video_id
+
+Fenster: 10 s, Schrittweite: 1 s (konfigurierbar)
+
+Physio Preprocessing:
+- BVP: Butterworth Bandpass 0.25–3.0 Hz, order=3 (zero-phase)
+- GSR: Butterworth Lowpass 1.5 Hz, order=3 (zero-phase)
+- SKT: Butterworth Lowpass 1.5 Hz, order=3 (zero-phase)
 
 Robustheit:
-- Sicheres CSV-Reading mit Fallback (engine='python', on_bad_lines='skip').
-- Segment-Cleaning (NaN-Handling, Mindestlänge, Mindestvarianz).
-- Herzraten-Fallbacks: HeartPy → NeuroKit2 → FFT.
-- RR-Fallback: NK2 → einfache Peak-Detektion (scipy.find_peaks).
-- Sichere Statistik (keine empty-slice/ddof-Warnungen).
-- Keine Bool-Ambiguität bei NumPy-Arrays.
+- Fuzzy-Spaltenerkennung (physio & annotation)
+- Samplingrate aus Zeitstempeln (ms) geschätzt (Fallback konfigurierbar)
+- Mehrstufige Peak-Detektion (HeartPy → NeuroKit2 → FFT-BPM)
+- Annotationen werden aus /data/interpolated/annotation/*.csv je Subject geladen
+  und per Zeit (ms) fensterweise gemittelt.
 
 Nutzung (Beispiel):
-python feature_extraction.py \
+python case_feature_extraction.py \
   --base "../CASE_dataset" \
   --subjects 1 2 3 5 6 7 \
   --out "outputs_10w1s/features_case_bvp_gsr_skt.csv" \
@@ -28,12 +35,12 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import argparse
-import warnings
 import re
+import warnings
 
 import numpy as np
 import pandas as pd
-from scipy.signal import butter, filtfilt, welch, find_peaks
+from scipy.signal import butter, filtfilt, welch
 
 # tqdm (optional)
 try:
@@ -67,28 +74,16 @@ class ExtractConfig:
 
 # ------------------------- Utilities -------------------------
 
-def _read_csv_safe(path: Path, **kwargs) -> pd.DataFrame:
-    """Robustes CSV-Reading mit Fallback auf Python-Engine & Bad-Line-Skip."""
-    try:
-        return pd.read_csv(path, **kwargs)
-    except Exception:
-        # pandas >=1.3: on_bad_lines='skip'; ältere Versionen: error_bad_lines / warn_bad_lines
-        try:
-            return pd.read_csv(path, engine='python', on_bad_lines='skip', **kwargs)
-        except TypeError:
-            return pd.read_csv(path, engine='python', error_bad_lines=False, warn_bad_lines=False, **kwargs)
-
-
 def _glob_phys_files(base_path: Path) -> List[Path]:
     return sorted((base_path / "data" / "interpolated" / "physiological").rglob("*.csv"))
 
 
 def _glob_annot_files(base_path: Path) -> List[Path]:
-    return sorted((base_path / "data" / "interpolated" / "annotations").rglob("*.csv"))
+    return sorted((base_path / "data" / "interpolated" / "annotation").rglob("*.csv"))
 
 
 def _subject_from_name(p: Path) -> Optional[int]:
-    m = re.search(r"(?:subject[_-]?|sub[_-]?|s)?(\d{1,2})", p.stem, re.IGNORECASE)
+    m = re.search(r"(?:subject[_-]?|s)?(\d{1,2})", p.stem, re.IGNORECASE)
     return int(m.group(1)) if m else None
 
 
@@ -97,14 +92,12 @@ def _find_columns_phys(df: pd.DataFrame) -> Dict[str, Optional[str]]:
 
     def pick(cands):
         for k in cands:
-            if k in lower:
-                return lower[k]
+            if k in lower: return lower[k]
         return None
 
     def fuzzy(keys):
         for lc, orig in lower.items():
-            if any(k in lc for k in keys):
-                return orig
+            if any(k in lc for k in keys): return orig
         return None
 
     time_col = pick(["time_ms", "time"]) or fuzzy(["time", "ms"])  # ms bevorzugt
@@ -120,17 +113,16 @@ def _find_columns_annot(df: pd.DataFrame) -> Dict[str, Optional[str]]:
 
     def pick(cands):
         for k in cands:
-            if k in lower:
-                return lower[k]
+            if k in lower: return lower[k]
         return None
 
     def fuzzy(keys):
         for lc, orig in lower.items():
-            if any(k in lc for k in keys):
-                return orig
+            if any(k in lc for k in keys): return orig
         return None
 
     time_col = pick(["time_ms", "jstime"]) or fuzzy(["jstime", "ms"])
+    # CASE liefert meist getrennte 'valence' und 'arousal'
     val_col = pick(["valence"]) or fuzzy(["val"])
     aro_col = pick(["arousal"]) or fuzzy(["aro"])
     vid_col = pick(["video_id", "videoid"]) or fuzzy(["video", "vid"])
@@ -138,24 +130,18 @@ def _find_columns_annot(df: pd.DataFrame) -> Dict[str, Optional[str]]:
 
 
 def _estimate_fs_ms(time_ms: np.ndarray, fs_fallback: float) -> float:
-    if time_ms is None or len(time_ms) < 3:
-        return fs_fallback
+    if time_ms is None or len(time_ms) < 3: return fs_fallback
     diffs = np.diff(time_ms.astype(float))
     diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
-    if len(diffs) == 0:
-        return fs_fallback
+    if len(diffs) == 0: return fs_fallback
     median_dt_ms = np.median(diffs)
-    if not np.isfinite(median_dt_ms) or median_dt_ms <= 0:
-        return fs_fallback
+    if not np.isfinite(median_dt_ms) or median_dt_ms <= 0: return fs_fallback
     return 1000.0 / median_dt_ms
 
 
-def _butter_filter(sig: np.ndarray, fs: float,
-                   low: Optional[float] = None,
-                   high: Optional[float] = None,
+def _butter_filter(sig: np.ndarray, fs: float, low: Optional[float] = None, high: Optional[float] = None,
                    order: int = 3):
-    if sig is None:
-        return None
+    if sig is None: return None
     if low is not None and high is not None:
         b, a = butter(order, [low / (fs / 2.0), high / (fs / 2.0)], btype="band")
     elif high is not None:
@@ -169,78 +155,32 @@ def _butter_filter(sig: np.ndarray, fs: float,
 
 def _safe_polyfit_slope(y: np.ndarray) -> float:
     x = np.arange(len(y), dtype=float)
-    if len(y) < 3:
-        return np.nan
+    if len(y) < 3: return np.nan
     try:
         return float(np.polyfit(x, y.astype(float), 1)[0])
     except Exception:
         return np.nan
 
 
-# --------------- Segment-Gesundheitschecks / Cleaning ----------------
-
-def _clean_segment(seg: np.ndarray, min_seconds: float, fs: float) -> Optional[np.ndarray]:
-    """Einfache Reinigung: NaNs linear auffüllen, Mindestlänge & Varianz prüfen."""
-    if seg is None:
-        return None
-    seg = np.asarray(seg, float)
-    n = seg.size
-    if n < int(min_seconds * fs):  # zu kurz
-        return None
-    mask = np.isfinite(seg)
-    if mask.sum() < max(10, int(0.5 * n)):  # zu viele NaNs
-        return None
-    if not mask.all():
-        idx = np.arange(n)
-        # Kantenfälle: wenn am Anfang/Ende NaNs sind
-        first = np.argmax(mask)
-        last = n - np.argmax(mask[::-1]) - 1
-        if first > 0:
-            seg[:first] = seg[first]
-        if last < n - 1:
-            seg[last + 1:] = seg[last]
-        # Interp Mitte
-        bad = ~mask
-        if bad.any():
-            seg[bad] = np.interp(idx[bad], idx[mask], seg[mask])
-    # Mindestvarianz
-    if np.nanstd(seg) < 1e-6:
-        return None
-    return seg
-
-
 # ------------------------- BVP & Features -------------------------
 
 def _bpm_fft(sig: np.ndarray, fs: float, fmin_hz: float = 0.7, fmax_hz: float = 3.5) -> float:
     try:
-        if sig is None:
-            return np.nan
-        x = np.asarray(sig, float)
-        if x.size < int(2 * fs):
-            return np.nan
-        f, Pxx = welch(x, fs=fs, nperseg=min(len(x), 2048))
+        f, Pxx = welch(sig, fs=fs, nperseg=min(len(sig), 2048))
         mask = (f >= fmin_hz) & (f <= fmax_hz)
-        if mask.sum() == 0:
-            return np.nan
+        if mask.sum() == 0: return np.nan
         f_peak = f[mask][np.argmax(Pxx[mask])]
         return float(f_peak * 60.0)
     except Exception:
         return np.nan
 
 
-def _estimate_breathing_from_bvp_fft(sig: np.ndarray, fs: float,
-                                     fmin: float = 0.1, fmax: float = 0.6) -> float:
+def _estimate_breathing_from_bvp_fft(sig: np.ndarray, fs: float, fmin: float = 0.1, fmax: float = 0.6) -> float:
     try:
-        if sig is None:
-            return np.nan
-        x = np.asarray(sig, float)
-        if x.size < int(2 * fs):
-            return np.nan
-        x = x - np.nanmean(x)
-        f, Pxx = welch(x, fs=fs, nperseg=min(len(x), 2048))
+        sig_d = sig - np.nanmean(sig)
+        f, Pxx = welch(sig_d, fs=fs, nperseg=min(len(sig_d), 2048))
         mask = (f >= fmin) & (f <= fmax)
-        if mask.sum() == 0:
-            return np.nan
+        if mask.sum() == 0: return np.nan
         f_peak = f[mask][np.argmax(Pxx[mask])]
         return float(f_peak * 60.0)
     except Exception:
@@ -250,20 +190,17 @@ def _estimate_breathing_from_bvp_fft(sig: np.ndarray, fs: float,
 def _mad(x):
     x = np.asarray(x, float)
     x = x[np.isfinite(x)]
-    if x.size == 0:
-        return np.nan
+    if x.size == 0: return np.nan
     med = np.median(x)
     return float(np.median(np.abs(x - med)))
 
 
-def _rr_from_peaks_nk(sig: np.ndarray, fs: float):
-    if nk is None:
-        return None
+def _rr_from_peaks(sig: np.ndarray, fs: float):
+    if nk is None: return None
     try:
         signals, info = nk.ppg_process(sig, sampling_rate=fs)
         peaks_idx = np.where(signals["PPG_Peaks"].to_numpy().astype(bool))[0]
-        if peaks_idx.size < 2:
-            return None
+        if peaks_idx.size < 2: return None
         rr = np.diff(peaks_idx) / float(fs) * 1000.0
         rr = rr[np.isfinite(rr)]
         return rr if rr.size >= 2 else None
@@ -271,35 +208,15 @@ def _rr_from_peaks_nk(sig: np.ndarray, fs: float):
         return None
 
 
-def _rr_from_peaks_simple(sig: np.ndarray, fs: float):
-    """Einfache Peak-Detektion als letzter Fallback."""
-    try:
-        s = np.asarray(sig, float)
-        s = s - np.nanmedian(s)
-        # Minimaler Peak-Abstand ~0.3s (200 bpm obere Grenze)
-        peaks, _ = find_peaks(s, distance=max(1, int(0.3 * fs)))
-        if peaks.size < 2:
-            return None
-        rr = np.diff(peaks) / float(fs) * 1000.0
-        rr = rr[np.isfinite(rr)]
-        return rr if rr.size >= 2 else None
-    except Exception:
-        return None
-
-
-def _features_bvp(seg_raw: np.ndarray, fs: float) -> Dict[str, float]:
+def _features_bvp(seg: np.ndarray, fs: float) -> Dict[str, float]:
     feats = {k: np.nan for k in [
         'bvp_bpm', 'bvp_ibi', 'bvp_sdnn', 'bvp_sdsd', 'bvp_rmssd', 'bvp_pnn20', 'bvp_pnn50',
         'bvp_mad', 'bvp_sd1', 'bvp_sd2', 'bvp_s', 'bvp_sd1sd2', 'bvp_breathingrate'
     ]}
-
-    # Segment bereinigen; unter 2 s/keine Varianz -> nur Spektral-Fallback
-    seg = _clean_segment(seg_raw, min_seconds=2.0, fs=fs)
-
     wd, m = None, None
 
-    # 1) HeartPy (nur bei validem Segment)
-    if seg is not None and hp is not None:
+    # 1) HeartPy
+    if hp is not None:
         try:
             wd, m = hp.process(seg, sample_rate=fs)
             mapping = {
@@ -311,39 +228,33 @@ def _features_bvp(seg_raw: np.ndarray, fs: float) -> Dict[str, float]:
                 val = m.get(hp_k, np.nan)
                 feats[out_k] = float(val) if np.isfinite(val) else np.nan
         except Exception as e:
-            print(f"[HeartPy] Hinweis: {e}")
+            print(f"[HeartPy] Fehler: {e}")
 
-    # 2) NK2 bpm (nur wenn noch nicht sinnvoll befüllt)
-    if (seg is not None) and (nk is not None) and (not np.isfinite(feats['bvp_bpm']) or feats['bvp_bpm'] <= 0):
+    # 2) NK2 bpm
+    if nk is not None and (not np.isfinite(feats['bvp_bpm']) or feats['bvp_bpm'] <= 0):
         try:
-            # kürzere Segmente vermeiden (NK2 ist sensibel)
-            if seg.size >= int(3 * fs):
-                signals, info = nk.ppg_process(seg, sampling_rate=fs)
-                rate = np.asarray(signals.get('PPG_Rate', []), float)
-                rate = rate[np.isfinite(rate)]
-                if rate.size > 0:
-                    feats['bvp_bpm'] = float(np.nanmean(rate))
+            signals, info = nk.ppg_process(seg, sampling_rate=fs)
+            rate = np.asarray(signals.get('PPG_Rate', []))
+            if rate.size > 0 and np.isfinite(rate).any():
+                feats['bvp_bpm'] = float(np.nanmean(rate))
         except Exception as e:
-            print(f"[NK2 bpm] Hinweis: {e}")
+            print(f"[NK2 bpm] Fehler: {e}")
 
     # 3) FFT Fallback
     if not np.isfinite(feats['bvp_bpm']) or feats['bvp_bpm'] <= 0:
-        feats['bvp_bpm'] = _bpm_fft(seg if seg is not None else seg_raw, fs)
+        feats['bvp_bpm'] = _bpm_fft(seg, fs)
 
-    # RR-basierte Kennzahlen ggf. nachziehen
+    # RR-basierte Metriken nachziehen wenn nötig
     need_rr = any(not np.isfinite(feats[k]) for k in
                   ['bvp_mad', 'bvp_sdnn', 'bvp_rmssd', 'bvp_sdsd', 'bvp_pnn20', 'bvp_pnn50', 'bvp_ibi'])
-    if need_rr and seg is not None:
+    if need_rr:
         rr = None
         if isinstance(wd, dict) and ('RR_list' in wd) and (len(wd['RR_list']) >= 2):
             rr = np.asarray(wd['RR_list'], float)
             rr = rr[np.isfinite(rr)]
-            if rr.size < 2:
-                rr = None
+            if rr.size < 2: rr = None
         if rr is None:
-            rr = _rr_from_peaks_nk(seg, fs)
-        if rr is None:
-            rr = _rr_from_peaks_simple(seg, fs)
+            rr = _rr_from_peaks(seg, fs)
 
         if rr is not None and rr.size >= 2:
             diffs = np.diff(rr)
@@ -352,44 +263,31 @@ def _features_bvp(seg_raw: np.ndarray, fs: float) -> Dict[str, float]:
                 feats['bvp_ibi'] = float(np.nanmean(rr)) if rr.size > 0 else np.nan
             if not np.isfinite(feats['bvp_mad']) or feats['bvp_mad'] <= 0:
                 feats['bvp_mad'] = _mad(rr)
-            if not np.isfinite(feats['bvp_sdnn']) and rr.size > 1:
-                feats['bvp_sdnn'] = float(np.nanstd(rr, ddof=1))
-            if not np.isfinite(feats['bvp_rmssd']) and diffs.size > 0:
-                feats['bvp_rmssd'] = float(np.sqrt(np.nanmean(diffs ** 2)))
-            if not np.isfinite(feats['bvp_sdsd']) and diffs.size > 1:
-                feats['bvp_sdsd'] = float(np.nanstd(diffs, ddof=1))
-            if not np.isfinite(feats['bvp_pnn20']) and diffs.size > 0:
-                feats['bvp_pnn20'] = float(np.mean(np.abs(diffs) > 20.0))
-            if not np.isfinite(feats['bvp_pnn50']) and diffs.size > 0:
-                feats['bvp_pnn50'] = float(np.mean(np.abs(diffs) > 50.0))
-        # sonst: RR-basierte Features bleiben NaN
+            if not np.isfinite(feats['bvp_sdnn']):
+                feats['bvp_sdnn'] = float(np.nanstd(rr, ddof=1)) if rr.size > 1 else np.nan
+            if not np.isfinite(feats['bvp_rmssd']):
+                feats['bvp_rmssd'] = float(np.sqrt(np.nanmean(diffs ** 2))) if diffs.size > 0 else np.nan
+            if not np.isfinite(feats['bvp_sdsd']):
+                feats['bvp_sdsd'] = float(np.nanstd(diffs, ddof=1)) if diffs.size > 1 else np.nan
+            if not np.isfinite(feats['bvp_pnn20']):
+                feats['bvp_pnn20'] = float(np.mean(np.abs(diffs) > 20.0)) if diffs.size > 0 else np.nan
+            if not np.isfinite(feats['bvp_pnn50']):
+                feats['bvp_pnn50'] = float(np.mean(np.abs(diffs) > 50.0)) if diffs.size > 0 else np.nan
+        else:
+            print("[RR-Fallback] Keine ausreichenden RR-Intervalle verfügbar.")
 
-    feats['bvp_breathingrate'] = _estimate_breathing_from_bvp_fft(seg if seg is not None else seg_raw, fs)
+    feats['bvp_breathingrate'] = _estimate_breathing_from_bvp_fft(seg, fs)
     return feats
 
 
 def _features_gsr(seg: np.ndarray) -> Dict[str, float]:
-    if seg is None or seg.size == 0:
-        return {'gsr_mean': np.nan, 'gsr_slope': np.nan}
-    segc = _clean_segment(seg, min_seconds=1.0, fs=20.0)
-    if segc is None:
-        segc = seg
-    return {
-        'gsr_mean': float(np.nanmean(segc)) if segc.size else np.nan,
-        'gsr_slope': _safe_polyfit_slope(segc)
-    }
+    return {'gsr_mean': float(np.nanmean(seg)) if seg.size else np.nan,
+            'gsr_slope': _safe_polyfit_slope(seg)}
 
 
 def _features_skt(seg: np.ndarray) -> Dict[str, float]:
-    if seg is None or seg.size == 0:
-        return {'skt_mean': np.nan, 'skt_slope': np.nan}
-    segc = _clean_segment(seg, min_seconds=1.0, fs=20.0)
-    if segc is None:
-        segc = seg
-    return {
-        'skt_mean': float(np.nanmean(segc)) if segc.size else np.nan,
-        'skt_slope': _safe_polyfit_slope(segc)
-    }
+    return {'skt_mean': float(np.nanmean(seg)) if seg.size else np.nan,
+            'skt_slope': _safe_polyfit_slope(seg)}
 
 
 # ------------------------- Sliding Windows -------------------------
@@ -397,25 +295,25 @@ def _features_skt(seg: np.ndarray) -> Dict[str, float]:
 def _iter_windows(n: int, fs: float, win_s: float, step_s: float) -> List[Tuple[int, int]]:
     win = int(round(win_s * fs))
     step = int(round(step_s * fs))
-    if win <= 1 or step <= 0 or n < win:
-        return []
-    return [(start, start + win) for start in range(0, n - win + 1, step)]
+    if win <= 1 or step <= 0: return []
+    return [(start, start + win) for start in range(0, max(0, n - win + 1), step)]
 
 
 # ------------------------- Laden Annotation je Subject -------------------------
 
 def _load_annotation_for_subject(base_path: Path, subject_id: int) -> Optional[pd.DataFrame]:
     ann_dir = base_path / "data" / "interpolated" / "annotations"
-    if not ann_dir.exists():
-        return None
+    if not ann_dir.exists(): return None
+    # Suche passende Datei(n) für Subject
     cands = [p for p in ann_dir.rglob("*.csv") if _subject_from_name(p) == subject_id]
-    if not cands:
-        return None
+    if not cands: return None
+    # Nimm die erste passende (oder mergen, falls mehrere – hier reicht i. d. R. eine)
     try:
-        df_a = _read_csv_safe(cands[0])
+        df_a = pd.read_csv(cands[0])
         cols = _find_columns_annot(df_a)
         if cols['time'] is None or (cols['valence'] is None and cols['arousal'] is None):
             return None
+        # Zeit in ms
         t = df_a[cols['time']].to_numpy()
         t_ms = t.astype(float) * 1000.0 if np.nanmax(t) < 1e5 else t.astype(float)
         out = pd.DataFrame({'time_ms': t_ms})
@@ -433,7 +331,7 @@ def _load_annotation_for_subject(base_path: Path, subject_id: int) -> Optional[p
 # ------------------------- Hauptlogik -------------------------
 
 def process_subject_csv(path: Path, cfg: ExtractConfig, df_ann: Optional[pd.DataFrame]) -> pd.DataFrame:
-    df = _read_csv_safe(path)
+    df = pd.read_csv(path)
     cols = _find_columns_phys(df)
     missing = [k for k, v in cols.items() if k != 'vid' and v is None]
     if missing:
@@ -512,14 +410,12 @@ def process_subject_csv(path: Path, cfg: ExtractConfig, df_ann: Optional[pd.Data
             mask = (df_ann['time_ms'] >= t0) & (df_ann['time_ms'] <= t1)
             if mask.any():
                 if 'valence' in df_ann.columns:
-                    row['valence'] = float(np.nanmean(pd.to_numeric(df_ann.loc[mask, 'valence'], errors='coerce')))
+                    row['valence'] = float(np.nanmean(df_ann.loc[mask, 'valence'].to_numpy(dtype=float)))
                 if 'arousal' in df_ann.columns:
-                    row['arousal'] = float(np.nanmean(pd.to_numeric(df_ann.loc[mask, 'arousal'], errors='coerce')))
+                    row['arousal'] = float(np.nanmean(df_ann.loc[mask, 'arousal'].to_numpy(dtype=float)))
             else:
-                if 'valence' in df_ann.columns:
-                    row['valence'] = np.nan
-                if 'arousal' in df_ann.columns:
-                    row['arousal'] = np.nan
+                if 'valence' in df_ann.columns: row['valence'] = np.nan
+                if 'arousal' in df_ann.columns: row['arousal'] = np.nan
 
         row.update(feats)
         rows.append(row)
@@ -561,10 +457,7 @@ def extract_features_case(cfg: ExtractConfig) -> pd.DataFrame:
         try:
             df_sub = process_subject_csv(f, cfg, df_ann)
         except Exception as e:
-            import traceback
             warnings.warn(f"Fehler bei {f.name}: {e}")
-            tb = traceback.format_exc(limit=1).strip().splitlines()[-1]
-            warnings.warn(f"{f.name} Trace: {tb}")
             df_sub = pd.DataFrame()
 
         if not df_sub.empty:
@@ -585,15 +478,18 @@ def extract_features_case(cfg: ExtractConfig) -> pd.DataFrame:
         'gsr_mean', 'gsr_slope', 'skt_mean', 'skt_slope'
     ]
     meta = ['subject', 'window_start_ms', 'window_end_ms'] + (['video_id'] if 'video_id' in out.columns else [])
+
+    # --- FIX: Valence & Arousal immer vorsehen (werden ggf. mit NaN gefüllt) ---
     anno_cols = ['arousal', 'valence']
 
     cols = meta + anno_cols + feat_cols
+
+    # fehlende Spalten anlegen
     for c in cols:
         if c not in out.columns:
             out[c] = np.nan
 
     out = out[cols]
-    cfg.out_file.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(cfg.out_file, index=False)
     print(f"[OK] Gespeichert: {cfg.out_file}  (n={len(out)})")
     return out
@@ -602,7 +498,7 @@ def extract_features_case(cfg: ExtractConfig) -> pd.DataFrame:
 # ------------------------- CLI -------------------------
 
 def _parse_args() -> ExtractConfig:
-    ap = argparse.ArgumentParser(description="CASE Feature Extraction (robust, inkl. AV)")
+    ap = argparse.ArgumentParser(description="CASE Feature Extraction (Masterarbeit-kompatibel, inkl. AV)")
     ap.add_argument('--base', type=str, required=True, help='Pfad zum CASE-Dataset Root (enthält data/)')
     ap.add_argument('--subjects', type=int, nargs='*', default=[], help='IDs, z.B. 1 2 3 5 6 (leer = alle)')
     ap.add_argument('--win', type=float, default=10.0, help='Fenstergröße in Sekunden (Default 10)')
@@ -625,4 +521,5 @@ def _parse_args() -> ExtractConfig:
 
 if __name__ == "__main__":
     cfg = _parse_args()
+    cfg.out_file.parent.mkdir(parents=True, exist_ok=True)
     extract_features_case(cfg)

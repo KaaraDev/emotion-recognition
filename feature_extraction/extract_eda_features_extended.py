@@ -219,7 +219,7 @@ def extract_eda_features(signal: pd.Series, sr: int) -> dict:
                 inter = nk.eda_intervalrelated(sig, sampling_rate=sr)
                 feats = pd.concat([feats, inter], axis=1)
             except Exception:
-                # not all NK versions have identical outputs; ignore if missing
+                # not all NK versions have identical outputs_10w1s; ignore if missing
                 pass
 
             # Convert to dict and prefix 'EDA_'

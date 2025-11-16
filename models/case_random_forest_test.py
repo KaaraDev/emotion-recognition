@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 
-import argparse
 import json
 import logging
 from pathlib import Path
@@ -18,8 +17,8 @@ from sklearn.metrics import (
 import joblib
 
 # ---------------------------------------------------------
-# AdaptiveSMOTE muss VOR joblib.load() definiert sein,
-# exakt gleich benannt wie im Training.
+# AdaptiveSMOTE muss VOR joblib.load() definiert sein
+# (exakt gleicher Name wie im Training!)
 # ---------------------------------------------------------
 from imblearn.base import BaseSampler
 from sklearn.base import clone
@@ -88,7 +87,7 @@ class AdaptiveSMOTE(BaseSampler):
             self._disabled_ = False
             return X_res, y_res
         except Exception as e:
-            logging.getLogger("rf_case_eval").warning(
+            logging.getLogger("rf_case_eval_all").warning(
                 "AdaptiveSMOTE: fallback to no-op (k=%d, classes=%s, counts=%s): %r",
                 k, classes.tolist(), counts.tolist(), e
             )
@@ -101,7 +100,7 @@ class AdaptiveSMOTE(BaseSampler):
 # Konstanten & Helper wie im Training
 # ---------------------------------------------------------
 
-# Video -> Emotion Mapping
+# Video -> Emotion Mapping (wie in train_rf_from_case_combined.py)
 VIDEO_TO_LABEL = {
     1: "amused",
     2: "amused",
@@ -111,7 +110,7 @@ VIDEO_TO_LABEL = {
     6: "relaxed",
     7: "scary",
     8: "scary",
-    # Pausen fliegen raus
+    # Pausen können im combined trotzdem vorkommen
     10: None,
     11: None,
     12: None,
@@ -140,7 +139,7 @@ def _majority_label(labels: pd.Series) -> str:
 # ---------------------------------------------------------
 
 def make_logger() -> logging.Logger:
-    logger = logging.getLogger("rf_case_eval")
+    logger = logging.getLogger("rf_case_eval_all")
     if logger.handlers:
         return logger  # schon konfiguriert
 
@@ -160,7 +159,7 @@ def make_logger() -> logging.Logger:
 
 
 # ---------------------------------------------------------
-# Evaluator-Klasse
+# Evaluator-Klasse (wie vorher, leicht angepasst)
 # ---------------------------------------------------------
 
 class VideoLabelEvaluatorCase:
@@ -429,59 +428,110 @@ class VideoLabelEvaluatorCase:
 
 
 # ---------------------------------------------------------
-# CLI
+# Helper: Table Loader (csv / gz / parquet)
 # ---------------------------------------------------------
 
-def parse_args():
-    ap = argparse.ArgumentParser(
-        description="Evaluate trained RF pipeline (from train_rf_from_case_combined.py) "
-                    "on held-out subjects (window + video level)."
-    )
-    ap.add_argument("--csv", required=True,
-                    help="Pfad zur Feature-CSV (combined.csv.gz mit allen Subjects).")
-    ap.add_argument("--model", required=True,
-                    help="Pfad zum gespeicherten final_model_pipeline.joblib.")
-    ap.add_argument("--out_dir", required=True,
-                    help="Wohin die Eval-Outputs geschrieben werden sollen.")
-    ap.add_argument("--subjects", nargs="+", required=True,
-                    help="Liste von Subject-IDs, z.B. --subjects 28 29")
-    ap.add_argument("--classes", nargs="+", default=None,
-                    help="Optionale Liste von Label-Klassen, z.B. --classes scary amused "
-                         "passend zum Trainingsexperiment.")
-    return ap.parse_args()
+def load_any_table(path: Path) -> pd.DataFrame:
+    path = Path(path)
+    suffix = path.suffix.lower()
+
+    # .parquet lesen
+    if suffix == ".parquet":
+        return pd.read_parquet(path)
+
+    # .csv oder .gz -> csv
+    if suffix in [".csv", ".gz"]:
+        return pd.read_csv(path)
+
+    # Fallback: versuch csv
+    return pd.read_csv(path, encoding="utf-8", errors="replace")
 
 
 # ---------------------------------------------------------
-# main
+# main: alle Modelle durchiterieren
 # ---------------------------------------------------------
 
 if __name__ == "__main__":
-    args = parse_args()
-
-    csv_path = Path(args.csv)
-    model_path = Path(args.model)
-    out_dir = Path(args.out_dir)
-    subjects = [int(s) for s in args.subjects]
-    classes_to_keep = args.classes if args.classes is not None else None
-
-    df_full = pd.read_csv(csv_path)
-
     logger = make_logger()
 
-    evaluator = VideoLabelEvaluatorCase(
-        model_path=model_path,
-        df_full=df_full,
-        subjects_to_test=subjects,
-        out_dir=out_dir,
-        classes_to_keep=classes_to_keep,
-        logger=logger,
-    )
+    # >>> HIER ggf. anpassen <<<
 
-    win_metrics = evaluator.evaluate_window_level()
-    vid_metrics = evaluator.evaluate_video_level_probs()
+    # Pfad zu deinem combined-File wie im Training
+    base_csv = Path("features_case_60w10s_test/combined.csv.gz")
 
-    print("\n=== Window-level metrics ===")
-    print(json.dumps(win_metrics, indent=2))
+    # Root, wo die trainierten Modelle liegen (wie in train_rf_from_case_combined.py)
+    model_root = Path("outputs_60w10s")
 
-    print("\n=== Video-level metrics ===")
-    print(json.dumps(vid_metrics, indent=2))
+    # Root, wo die Eval-Ergebnisse hinsollen
+    eval_root = Path("eval_60w10s")
+
+    # Welche Subjects sollen evaluiert werden?
+    SUBJECTS_TO_TEST = [30]  # <- hier deine Test-Subjects eintragen
+
+    # Alle Experimente / Modelle wie im Training
+    experiments = [
+        ("scary_vs_amused",  ["scary", "amused"]),
+        ("bored_vs_relaxed", ["bored", "relaxed"]),
+        ("scary_vs_bored",   ["scary", "bored"]),
+        ("amused_vs_bored",  ["amused", "bored"]),
+    ]
+
+    # Daten einmal laden
+    logger.info("Lade Feature-Tabelle aus %s ...", base_csv)
+    df_full = load_any_table(base_csv)
+    logger.info("Gelesen: %d Zeilen, %d Spalten", len(df_full), df_full.shape[1])
+
+    # Optional: wenn in combined noch keine Pausen gefiltert sind, schmeiß sie raus
+    if "video" in df_full.columns:
+        before_pause = len(df_full)
+        df_full = df_full[~df_full["video"].isin([10, 11, 12])].copy()
+        logger.info("Pausen (10/11/12) entfernt: %d -> %d Zeilen", before_pause, len(df_full))
+
+    results_summary = []
+
+    for exp_name, classes in experiments:
+        logger.info("\n=== Starte Evaluation für Experiment: %s (%s) ===", exp_name, classes)
+
+        model_path = model_root / exp_name / "final_model_pipeline.joblib"
+        out_dir = eval_root / exp_name
+
+        if not model_path.exists():
+            logger.error("Modell für Experiment %s nicht gefunden unter %s – überspringe.",
+                         exp_name, model_path)
+            continue
+
+        evaluator = VideoLabelEvaluatorCase(
+            model_path=model_path,
+            df_full=df_full,
+            subjects_to_test=SUBJECTS_TO_TEST,
+            out_dir=out_dir,
+            classes_to_keep=classes,
+            logger=logger,
+        )
+
+        win_metrics = evaluator.evaluate_window_level()
+        vid_metrics = evaluator.evaluate_video_level_probs()
+
+        # Kleine Übersicht in einer Liste sammeln
+        results_summary.append({
+            "experiment": exp_name,
+            "classes": classes,
+            "window_acc": win_metrics["accuracy"],
+            "window_bacc": win_metrics["balanced_accuracy"],
+            "window_f1_macro": win_metrics["f1_macro"],
+            "video_acc": vid_metrics["accuracy"],
+            "video_bacc": vid_metrics["balanced_accuracy"],
+            "video_f1_macro": vid_metrics["f1_macro"],
+        })
+
+        logger.info("Experiment %s fertig.", exp_name)
+
+    # Gesamtübersicht als CSV
+    if results_summary:
+        eval_root.mkdir(parents=True, exist_ok=True)
+        summary_df = pd.DataFrame(results_summary)
+        summary_df.to_csv(eval_root / "summary_all_experiments.csv", index=False)
+        logger.info("Gesamtübersicht gespeichert nach %s",
+                    eval_root / "summary_all_experiments.csv")
+
+    logger.info("Alle Evaluationen abgeschlossen.")

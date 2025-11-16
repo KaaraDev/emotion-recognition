@@ -17,24 +17,17 @@ class WindowMeta:
 
 
 class CaseDataPreprocessor:
-    """
-    Angepasst:
-    - Kein hartes globales Resampling mehr auf fs (z.B. 20 Hz)
-    - Stattdessen arbeiten wir auf der nativen Samplingrate aus den CSVs.
-    - Für jedes Fenster schätzen wir die effektive fs_local aus time_s
-      und geben die an NeuroKit weiter.
-    """
-
     def __init__(
             self,
             base_path: str | Path,
-            window_size: int = 5,  # Sekunden Fensterlänge
-            step_size: int = 1,  # Sekunden Schritt
+            window_size: int = 5,
+            step_size: int = 1,
             subjects: Optional[List[int]] = None,
             label_shift_s: float = 0.0,
             use_video_as_feature: bool = False,
             normalize_video_lengths: bool = False,
-            target_video_len_s: Optional[float] = None
+            target_video_len_s: Optional[float] = None,
+            use_raw: bool = True,   # <--- NEU: standardmäßig raw benutzen
     ):
         self.base_path = Path(base_path)
         self.window_size = int(window_size)
@@ -44,12 +37,13 @@ class CaseDataPreprocessor:
         self.use_video_as_feature = use_video_as_feature
         self.normalize_video_lengths = bool(normalize_video_lengths)
         self.target_video_len_s = target_video_len_s
+        self.use_raw = bool(use_raw)
 
-        # physiologische Kanäle, wie gehabt
         self.phys_cols = [
             "ecg", "bvp", "gsr", "rsp", "skt",
             "emg_zygo", "emg_coru", "emg_trap"
         ]
+
 
     # ---------- Hilfsfunktionen ----------
 
@@ -113,19 +107,104 @@ class CaseDataPreprocessor:
     # ---------- Kernmethoden ----------
 
     def load_subject(self, subject_id: int) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        p_phys = self.base_path / "case_dataset-master" / "data" / "interpolated" / "physiological" / f"sub_{subject_id}.csv"
-        p_ann = self.base_path / "case_dataset-master" / "data" / "interpolated" / "annotations" / f"sub_{subject_id}.csv"
+        """
+        Lädt entweder:
+        - non-interpolated physiologische DAQ-Daten (mit 'daqtime' in ms) + interpolierte Annotationen
+        - oder (wenn use_raw=False) komplett interpolierte Daten, wie vorher.
 
-        phys = pd.read_csv(p_phys)
-        ann = pd.read_csv(p_ann)
+        Danach gilt immer:
+        - phys hat eine Spalte 'time_s' in Sekunden
+        - ann hat eine Spalte 'time_s' in Sekunden sowie 'valence', 'arousal'
+        """
 
-        if "daqtime" not in phys.columns or "jstime" not in ann.columns:
-            raise ValueError("Erwarte Spalten 'daqtime' (phys) bzw. 'jstime' (ann) in Millisekunden.")
+        if self.use_raw:
+            # --------- NON-INTERPOLATED PHYSIOLOGICAL (hohe fs) ----------
+            p_phys = (
+                    self.base_path
+                    / "case_dataset-master"
+                    / "data"
+                    / "non-interpolated"
+                    / "physiological"
+                    / f"sub_{subject_id}.csv"
+            )
 
-        phys["time_s"] = phys["daqtime"] / 1000.0
-        ann["time_s"] = ann["jstime"] / 1000.0
+            # Annotationen bleiben aus dem interpolated-Ordner
+            p_ann = (
+                    self.base_path
+                    / "case_dataset-master"
+                    / "data"
+                    / "interpolated"
+                    / "annotations"
+                    / f"sub_{subject_id}.csv"
+            )
 
-        return phys, ann
+            phys = pd.read_csv(p_phys)
+
+            # Erwartete Spalten siehe README: daqtime, ecg, bvp, gsr, rsp, skt, emg_zygo, emg_coru, emg_trap, video
+            required_phys_cols = [
+                "daqtime", "ecg", "bvp", "gsr", "rsp",
+                "skt", "emg_zygo", "emg_coru", "emg_trap", "video"
+            ]
+            missing = [c for c in required_phys_cols if c not in phys.columns]
+            if missing:
+                raise ValueError(
+                    f"In {p_phys} fehlen erwartete Spalten: {missing}"
+                )
+
+            # DAQ-Zeit (ms) -> Sekunden
+            phys["time_s"] = phys["daqtime"].astype(float) / 1000.0
+
+            # --------- INTERPOLATED ANNOTATIONS ----------
+            ann = pd.read_csv(p_ann)
+
+            if "jstime" not in ann.columns:
+                raise ValueError(
+                    f"'jstime' fehlt in {p_ann} (Annotations-Datei)."
+                )
+
+            # JS-Zeit (ms) -> Sekunden
+            ann["time_s"] = ann["jstime"].astype(float) / 1000.0
+
+            # Falls die Spalten für Valence/Arousal anders heißen, hier ggf. mappen
+            # (für Standard-CASE sollten 'valence' und 'arousal' bereits passen)
+            if "valence" not in ann.columns or "arousal" not in ann.columns:
+                raise ValueError(
+                    f"'valence' und/oder 'arousal' fehlen in {p_ann}."
+                )
+
+            return phys, ann
+
+        else:
+            # --------- ALTE VARIANTE: komplett interpolated ----------
+            p_phys = (
+                    self.base_path
+                    / "case_dataset-master"
+                    / "data"
+                    / "interpolated"
+                    / "physiological"
+                    / f"sub_{subject_id}.csv"
+            )
+            p_ann = (
+                    self.base_path
+                    / "case_dataset-master"
+                    / "data"
+                    / "interpolated"
+                    / "annotations"
+                    / f"sub_{subject_id}.csv"
+            )
+
+            phys = pd.read_csv(p_phys)
+            ann = pd.read_csv(p_ann)
+
+            if "daqtime" not in phys.columns or "jstime" not in ann.columns:
+                raise ValueError(
+                    "Erwarte Spalten 'daqtime' (phys) bzw. 'jstime' (ann) in Millisekunden."
+                )
+
+            phys["time_s"] = phys["daqtime"] / 1000.0
+            ann["time_s"] = ann["jstime"] / 1000.0
+
+            return phys, ann
 
     def interpolate_annotations(self, phys: pd.DataFrame, ann: pd.DataFrame) -> pd.DataFrame:
         """
@@ -580,9 +659,9 @@ if __name__ == "__main__":
 
     prep = CaseDataPreprocessor(
         base_path=base_path,
-        window_size=60,
-        step_size=60,
-        subjects=list(range(30, 31)),
+        window_size=10,
+        step_size=2,
+        subjects=list(range(1, 29)),
         label_shift_s=0.0,
         use_video_as_feature=False,
         normalize_video_lengths=False,
@@ -593,7 +672,7 @@ if __name__ == "__main__":
     X, yv, ya, meta = prep.prepare_all()
 
     # ---------------- Cleanup & Feature-Selektion ----------------
-    out_dir = Path("features_case")
+    out_dir = Path("features_case_10w2s")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 1) Inf-Werte in NaN umwandeln

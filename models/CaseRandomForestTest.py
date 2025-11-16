@@ -24,7 +24,7 @@ from models.CaseRandomForestClassifier import CaseRandomForestClassifier, RFConf
 MODEL_PATH = "C:/Users/metin/OneDrive/Desktop/Informatik/10.Semester/thesis/emotion-recognition/models_v3/outputs/rf_model.joblib"
 REMOVE_VIDEOS = {10, 11, 12}       # Blue/Start/End global raus
 TEST_SUBJECTS = {30}               # echter Holdout
-FEATURES_DIR = "features_case"     # falls kombiniert vorliegt, nutzen wir das
+FEATURES_DIR = "features_case_10w1s"  # falls kombiniert vorliegt, nutzen wir das
 COMBINED_BASENAME = "combined"
 PREFER_PARQUET = True
 

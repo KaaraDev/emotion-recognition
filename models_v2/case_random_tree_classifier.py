@@ -295,7 +295,7 @@ def final_evaluate(clf: RandomForestClassifier, X, y, groups, cfg: TrainConfig, 
 def parse_args() -> TrainConfig:
     ap = argparse.ArgumentParser(description="RF Training (Masterarbeit-Setup)")
     ap.add_argument('--csv', required=True, help='Pfad zur Feature-CSV')
-    ap.add_argument('--out_dir', default='outputs/rf_masterlike', help='Ausgabeordner')
+    ap.add_argument('--out_dir', default='outputs_10w1s/rf_masterlike', help='Ausgabeordner')
     ap.add_argument('--label_col', default=None, help='Name der Labelspalte (falls vorhanden)')
     ap.add_argument('--map_from_video_id', action='store_true', help='Label aus video_id per Mapping erzeugen')
     ap.add_argument('--seed', type=int, default=42, help='Random Seed')

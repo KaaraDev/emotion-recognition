@@ -299,7 +299,7 @@ CORE_FEATURES_MAP = {
         "EDA_SCR_Peaks_Amplitude_Max"  # if available
     ],
 
-    # useful model-based NK2 outputs (if available)
+    # useful model-based NK2 outputs_10w1s (if available)
     "EDA_Sympathetic": ["EDA_EDA_Sympathetic"],
     "EDA_SympatheticN": ["EDA_EDA_SympatheticN"],
     "EDA_Autocorrelation": ["EDA_EDA_Autocorrelation"],

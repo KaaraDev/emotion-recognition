@@ -859,7 +859,7 @@ def parse_args() -> TrainConfig:
     ap = argparse.ArgumentParser(
         description="RF Training aus Valence–Arousal Ranges (4 Klassen, neutral→bored) – robust (Aggregation, Video-Eval optional)")
     ap.add_argument('--csv', required=True, help='Pfad zur Feature-CSV (mit arousal, valence, subject, phys-Features)')
-    ap.add_argument('--out_dir', default='outputs/rf_ranges_fixed', help='Ausgabeordner')
+    ap.add_argument('--out_dir', default='outputs_10w1s/rf_ranges_fixed', help='Ausgabeordner')
     ap.add_argument('--seed', type=int, default=42, help='Random Seed')
     ap.add_argument('--log_level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'])
     ap.add_argument('--exclude_pauses', action='store_true',
