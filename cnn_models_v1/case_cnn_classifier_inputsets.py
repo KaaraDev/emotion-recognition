@@ -1,4 +1,4 @@
-# train_cnn_video_type_noninterp_binary_improved.py
+# train_cnn_video_type_noninterp_binary_inputsets.py
 
 from __future__ import annotations
 from dataclasses import dataclass
@@ -380,6 +380,33 @@ def eval_epoch(
 
 
 # ----------------------------------------------------------
+# Kanal-Auswahl (Input-Kombinationen)
+# ----------------------------------------------------------
+
+def select_channels(
+        X: np.ndarray,
+        channel_cols: List[str],
+        selected_names: List[str]
+) -> Tuple[np.ndarray, List[str]]:
+    """
+    Wählt nur bestimmte Kanäle (per Name) aus X.
+    X: [N, C, T]
+    channel_cols: Länge C
+    selected_names: Kanalnamen, die behalten werden sollen
+    """
+    name_to_idx = {name: i for i, name in enumerate(channel_cols)}
+    idxs = []
+    for name in selected_names:
+        if name not in name_to_idx:
+            raise ValueError(f"Gewünschter Kanal '{name}' ist nicht in channel_cols enthalten.")
+        idxs.append(name_to_idx[name])
+    idxs = np.array(idxs, dtype=int)
+    X_sel = X[:, idxs, :]
+    channel_cols_sel = [channel_cols[i] for i in idxs]
+    return X_sel, channel_cols_sel
+
+
+# ----------------------------------------------------------
 # Experiment-Runner (Binary-Setups)
 # ----------------------------------------------------------
 
@@ -590,74 +617,6 @@ def run_binary_experiment(
         else:
             print("  -> Kein bestes Modell für diesen Fold (evtl. alle Folds übersprungen).")
 
-    # Nach allen Folds: finales Modell auf ALLEN Daten trainieren
-    # (nur wenn überhaupt Samples vorhanden sind)
-    if X_exp.shape[0] > 0:
-        train_final_model_on_all_data(
-            exp_name=exp_name,
-            cls_pos=cls_pos,
-            cls_neg=cls_neg,
-            X_exp=X_exp,
-            y_bin=y_bin,
-            cfg=cfg,
-            in_channels=in_channels,
-        )
-
-
-def train_final_model_on_all_data(
-        exp_name: str,
-        cls_pos: str,
-        cls_neg: str,
-        X_exp: np.ndarray,
-        y_bin: np.ndarray,
-        cfg: TrainCfg,
-        in_channels: int,
-):
-    """
-    Trainiert ein finales Modell auf allen verfügbaren Fenstern für dieses Binary-Setup.
-    Nutzt dieselbe Architektur, Loss & Optimizer-Einstellungen wie in der CV.
-    Speichert das Modell als {exp_name}_final.pt.
-    """
-    device = cfg.device
-    n_classes = 2
-
-    out_dir_exp = cfg.out_dir / exp_name
-    out_dir_exp.mkdir(parents=True, exist_ok=True)
-
-    # DataLoader über alle Daten
-    full_loader = DataLoader(
-        WindowDataset(X_exp, y_bin),
-        batch_size=cfg.batch_size,
-        shuffle=True,
-        num_workers=cfg.num_workers,
-        pin_memory=True,
-    )
-
-    model = CNN1DVideoType(in_channels=in_channels, n_classes=n_classes).to(device)
-
-    # Class-Weights wie in CV
-    class_counts = np.bincount(y_bin, minlength=2)
-    class_weights = 1.0 / (class_counts + 1e-8)
-    class_weights = class_weights / class_weights.mean()
-    class_weights_t = torch.tensor(class_weights, dtype=torch.float32, device=device)
-
-    criterion = nn.CrossEntropyLoss(weight=class_weights_t)
-    optimizer = torch.optim.Adam(
-        model.parameters(),
-        lr=cfg.lr,
-        weight_decay=cfg.weight_decay,
-    )
-
-    print(f"\n  === Trainiere finales Modell auf ALLEN Daten: {exp_name} ({cls_pos} vs {cls_neg}) ===")
-    for epoch in range(1, cfg.num_epochs + 1):
-        tloss = train_one_epoch(model, full_loader, optimizer, device, criterion)
-        print(f"    [FINAL] Epoch {epoch:02d} | train_loss={tloss:.4f}")
-
-    # Komplettes Modell speichern
-    final_model_path = out_dir_exp / f"{exp_name}_final.pt"
-    torch.save(model.state_dict(), final_model_path)
-    print(f"  -> Finales Modell auf allen Daten gespeichert als {final_model_path}")
-
 
 # ----------------------------------------------------------
 # Main
@@ -668,7 +627,8 @@ def main():
         noninterp_phys_dir=Path(
             r"C:\Users\metin\OneDrive\Desktop\Informatik\10.Semester\thesis\emotion-recognition\case_dataset-master\data\non-interpolated\physiological"
         ),
-        out_dir=Path("outputs_cnn_noninterp_binary"),
+        # NEUER OUTPUT-ORDNER, damit alte Ergebnisse nicht überschrieben werden
+        out_dir=Path("outputs_cnn_noninterp_binary_inputsets"),
     )
 
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
@@ -688,6 +648,50 @@ def main():
     print(f"y-Shape: {y_str.shape}")
     print(f"Kanäle: {channel_cols}")
 
+    # --------------------------------------------------
+    # Verschiedene Input-Kombinationen definieren
+    # (wird defensiv gebaut – nur Sets, die wirklich Kanäle enthalten)
+    # --------------------------------------------------
+    input_sets: Dict[str, List[str]] = {}
+
+    # 1) Alle Kanäle
+    input_sets["all_channels"] = channel_cols
+
+    # Hilfsfunktion: prüft, ob ein Pattern in irgendeinem Kanal vorkommt
+    lower_cols = [c.lower() for c in channel_cols]
+
+    # 2) Ohne EMG (falls es EMG-Kanäle gibt)
+    if any("emg" in c for c in lower_cols):
+        no_emg_cols = [c for c in channel_cols if "emg" not in c.lower()]
+        if len(no_emg_cols) > 0 and len(no_emg_cols) < len(channel_cols):
+            input_sets["no_emg"] = no_emg_cols
+
+    # 3) Nur EDA / GSR (falls vorhanden)
+    eda_cols = [c for c in channel_cols if ("eda" in c.lower() or "gsr" in c.lower())]
+    if len(eda_cols) > 0:
+        input_sets["eda_only"] = eda_cols
+
+    # 4) Nur ECG (falls vorhanden)
+    ecg_cols = [c for c in channel_cols if "ecg" in c.lower()]
+    if len(ecg_cols) > 0:
+        input_sets["ecg_only"] = ecg_cols
+
+    # 5) Ohne RESP (falls vorhanden)
+    if any("resp" in c for c in lower_cols):
+        no_resp_cols = [c for c in channel_cols if "resp" not in c.lower()]
+        if len(no_resp_cols) > 0 and len(no_resp_cols) < len(channel_cols):
+            input_sets["no_resp"] = no_resp_cols
+
+    # Du kannst hier jederzeit noch manuell weitere Sets ergänzen,
+    # z.B. nur bestimmte EMG-Kanäle etc.
+
+    # Sicherheit: nur Sets behalten, die nicht leer sind
+    input_sets = {name: cols for name, cols in input_sets.items() if len(cols) > 0}
+
+    print("\nDefinierte Input-Sets:")
+    for name, cols in input_sets.items():
+        print(f"  {name}: {len(cols)} Kanäle")
+
     # Definiere deine Binary-Experimente
     experiments = [
         ("scary_vs_boring", "scary", "boring"),
@@ -696,17 +700,24 @@ def main():
         ("relaxed_vs_boring", "relaxed", "boring"),
     ]
 
-    for exp_name, cls_pos, cls_neg in experiments:
-        run_binary_experiment(
-            exp_name=exp_name,
-            cls_pos=cls_pos,
-            cls_neg=cls_neg,
-            X=X,
-            y_str=y_str,
-            groups=groups,
-            channel_cols=channel_cols,
-            cfg=cfg,
-        )
+    # Für jedes Input-Set alle Experimente laufen lassen
+    for input_name, cols_sel in input_sets.items():
+        print(f"\n==================== INPUT-SET: {input_name} ====================")
+        X_sel, channel_cols_sel = select_channels(X, channel_cols, cols_sel)
+        print(f"  Verwendete Kanäle ({len(channel_cols_sel)}): {channel_cols_sel}")
+
+        for base_exp_name, cls_pos, cls_neg in experiments:
+            exp_name = f"{base_exp_name}__inputs={input_name}"
+            run_binary_experiment(
+                exp_name=exp_name,
+                cls_pos=cls_pos,
+                cls_neg=cls_neg,
+                X=X_sel,
+                y_str=y_str,
+                groups=groups,
+                channel_cols=channel_cols_sel,
+                cfg=cfg,
+            )
 
 
 if __name__ == "__main__":

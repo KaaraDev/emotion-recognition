@@ -261,12 +261,28 @@ class VideoLabelEvaluatorCase:
 
         self.df_test = df_test
 
-        # ----------------- Features bestimmen wie im Training -----------------
-        drop_cols = META_COLS | LABEL_COLS | {"label"}
-        feat_cols = [c for c in self.df_test.columns if c not in drop_cols]
-        if not feat_cols:
-            raise ValueError("Keine Feature-Spalten gefunden – prüfe Meta/LABEL_COLS.")
-        self.feat_cols = feat_cols
+        # ---------------------------------------------------------
+        # Feature-Liste aus dem Training laden
+        # ---------------------------------------------------------
+        feat_path = self.model_path.parent / "used_features.json"
+        if not feat_path.exists():
+            raise FileNotFoundError(f"Training-Featureliste fehlt: {feat_path}")
+
+        with open(feat_path, "r", encoding="utf-8") as f:
+            train_feat_cols = json.load(f)
+
+        self.feat_cols = train_feat_cols
+
+        # Fehlende Spalten im Test-DF auffüllen (falls vorhanden)
+        for col in train_feat_cols:
+            if col not in self.df_test.columns:
+                self.logger.warning(f"Spalte '{col}' fehlt im Test-Set – fülle mit 0.")
+                self.df_test[col] = 0.0
+
+        # Feature-Matrix in derselben Reihenfolge wie im Training
+        self.X_test = self.df_test[self.feat_cols].to_numpy(dtype=float)
+        self.y_test = self.df_test["label"].to_numpy()
+
         self.logger.info("Using %d feature columns for eval.", len(self.feat_cols))
 
         self.X_test = self.df_test[self.feat_cols].to_numpy(dtype=float)
@@ -457,16 +473,16 @@ if __name__ == "__main__":
     # >>> HIER ggf. anpassen <<<
 
     # Pfad zu deinem combined-File wie im Training
-    base_csv = Path("features_case_60w10s_test/combined.csv.gz")
+    base_csv = Path("features_case_60w15s_test/combined.csv.gz")
 
     # Root, wo die trainierten Modelle liegen (wie in train_rf_from_case_combined.py)
-    model_root = Path("outputs_60w10s")
+    model_root = Path("outputs_60w15s")
 
     # Root, wo die Eval-Ergebnisse hinsollen
-    eval_root = Path("eval_60w10s")
+    eval_root = Path("eval_60w15s")
 
     # Welche Subjects sollen evaluiert werden?
-    SUBJECTS_TO_TEST = [30]  # <- hier deine Test-Subjects eintragen
+    SUBJECTS_TO_TEST = [29,  30]  # <- hier deine Test-Subjects eintragen
 
     # Alle Experimente / Modelle wie im Training
     experiments = [
@@ -474,6 +490,7 @@ if __name__ == "__main__":
         ("bored_vs_relaxed", ["bored", "relaxed"]),
         ("scary_vs_bored",   ["scary", "bored"]),
         ("amused_vs_bored",  ["amused", "bored"]),
+        ("all_emotion", ["amused", "bored", "relaxed", "scary"]),
     ]
 
     # Daten einmal laden

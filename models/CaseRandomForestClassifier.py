@@ -97,6 +97,7 @@ from sklearn.base import clone
 from numbers import Integral
 from sklearn.utils._param_validation import Interval
 
+
 class AdaptiveSMOTE(BaseSampler):
     """
     SMOTE/BorderlineSMOTE/SVMSMOTE mit adaptivem k und sicheren Fallbacks:
@@ -197,7 +198,6 @@ def build_pipeline(cfg: TrainCfg) -> ImbPipeline:
     return ImbPipeline(steps=steps)
 
 
-
 # ------------------- Daten laden -------------------
 
 META_COLS = {"subject", "start_s", "end_s", "video"}
@@ -270,8 +270,29 @@ def downsample_class(df: pd.DataFrame, cls: str, cfg: TrainCfg, logger: logging.
 def run_group_cv(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> Dict[str, Any]:
     # Feature-Spalten = alles, was nicht meta + nicht label
     drop_cols = META_COLS | LABEL_COLS | {"label"}
-    feat_cols = [c for c in df.columns if c not in drop_cols]
-    logger.info("Verwende %d Feature-Spalten.", len(feat_cols))
+    candidate_feats = [c for c in df.columns if c not in drop_cols]
+
+    # >>> NEU: komplett leere Spalten rausfiltern
+    non_empty_feats = []
+    empty_feats = []
+    for c in candidate_feats:
+        col = df[c]
+        # "komplett leer" = nur NaN
+        if col.notna().any():
+            non_empty_feats.append(c)
+        else:
+            empty_feats.append(c)
+
+    if empty_feats:
+        logger.info(
+            "Ignoriere %d komplett leere Feature-Spalten: %s",
+            len(empty_feats),
+            empty_feats,
+        )
+
+    feat_cols = non_empty_feats
+    logger.info("Verwende %d Feature-Spalten (ohne komplett leere).", len(feat_cols))
+    # <<< ENDE NEU
 
     X = df[feat_cols].to_numpy(dtype=float)
     y = df["label"].to_numpy()
@@ -294,10 +315,11 @@ def run_group_cv(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> Dic
         bacc = balanced_accuracy_score(y[va_idx], y_hat)
         f1m = f1_score(y[va_idx], y_hat, average="macro")
 
-        logger.info("Fold %d/%d: acc=%.4f | bAcc=%.4f | f1_macro=%.4f",
-                    fold, cfg.n_folds, acc, bacc, f1m)
+        logger.info(
+            "Fold %d/%d: acc=%.4f | bAcc=%.4f | f1_macro=%.4f",
+            fold, cfg.n_folds, acc, bacc, f1m
+        )
 
-        # Confusion für den Fold speichern
         cm_labels = sorted(np.unique(np.concatenate([y[va_idx], y_hat])))
         cm = confusion_matrix(y[va_idx], y_hat, labels=cm_labels)
         cm_df = pd.DataFrame(cm, index=cm_labels, columns=cm_labels)
@@ -329,7 +351,6 @@ def run_group_cv(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> Dic
     logger.info("== Pooled results over all folds ==")
     logger.info("acc=%.4f | bAcc=%.4f | f1_macro=%.4f", acc_all, bacc_all, f1m_all)
 
-    # pooled confusion
     labels_sorted = sorted(np.unique(np.concatenate([all_true, all_pred])))
     cm_all = confusion_matrix(all_true, all_pred, labels=labels_sorted)
     pd.DataFrame(cm_all, index=labels_sorted, columns=labels_sorted) \
@@ -382,13 +403,13 @@ def refit_final(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger, feat_co
 # ------------------- main -------------------
 
 if __name__ == "__main__":
-    base_csv = Path("features_case_60w30s/combined.csv.gz")
+    base_csv = Path("features_case_90w30s/combined.csv.gz")
 
     experiments = [
-        ("scary_vs_amused",  ["scary", "amused"]),
+        ("scary_vs_amused", ["scary", "amused"]),
         ("bored_vs_relaxed", ["bored", "relaxed"]),
-        ("scary_vs_bored",   ["scary", "bored"]),
-        ("amused_vs_bored",  ["amused", "bored"]),
+        ("scary_vs_bored", ["scary", "bored"]),
+        ("amused_vs_bored", ["amused", "bored"]),
     ]
 
     for exp_name, classes in experiments:
@@ -396,7 +417,7 @@ if __name__ == "__main__":
 
         cfg = TrainCfg(
             csv_path=base_csv,
-            out_dir=Path(f"outputs_60w30s/{exp_name}"),
+            out_dir=Path(f"outputs_90w30s/{exp_name}"),
             random_state=42,
             classes_to_keep=classes,
         )
@@ -431,4 +452,3 @@ if __name__ == "__main__":
             json.dump(feat_cols, f, indent=2)
 
         logger.info("Experiment %s fertig.", exp_name)
-

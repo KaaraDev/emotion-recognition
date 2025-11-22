@@ -26,7 +26,7 @@ Nutzung (Beispiel):
 python case_feature_extraction.py \
   --base "../CASE_dataset" \
   --subjects 1 2 3 5 6 7 \
-  --out "outputs/features_case_bvp_gsr_skt.csv" \
+  --out "outputs_10w1s/features_case_bvp_gsr_skt.csv" \
   --win 10 --step 1
 """
 from __future__ import annotations
@@ -503,7 +503,7 @@ def _parse_args() -> ExtractConfig:
     ap.add_argument('--subjects', type=int, nargs='*', default=[], help='IDs, z.B. 1 2 3 5 6 (leer = alle)')
     ap.add_argument('--win', type=float, default=10.0, help='Fenstergröße in Sekunden (Default 10)')
     ap.add_argument('--step', type=float, default=1.0, help='Schrittweite in Sekunden (Default 1)')
-    ap.add_argument('--out', type=str, default='outputs/features_case_bvp_gsr_skt.csv', help='Ausgabe-CSV')
+    ap.add_argument('--out', type=str, default='outputs_10w1s/features_case_bvp_gsr_skt.csv', help='Ausgabe-CSV')
     ap.add_argument('--fs_fallback', type=float, default=1000.0, help='Fallback-Samplingrate (Hz)')
     ap.add_argument('--no-progress', action='store_true', help='Deaktiviert tqdm-Fortschrittsbalken')
     args = ap.parse_args()
