@@ -38,7 +38,7 @@ class TrainCfg:
     lr: float = 5e-4
     weight_decay: float = 1e-5
     num_workers: int = 4
-    early_stopping_patience: int = 10  # Epochen ohne Verbesserung
+    early_stopping_patience: int = 3  # Epochen ohne Verbesserung
 
     # CV
     random_state: int = 42
@@ -625,7 +625,7 @@ def run_binary_experiment(
 def main():
     cfg = TrainCfg(
         noninterp_phys_dir=Path(
-            r"C:\Users\metin\OneDrive\Desktop\Informatik\10.Semester\thesis\emotion-recognition\case_dataset-master\data\non-interpolated\physiological"
+            r"C:\Users\Metin\Desktop\Informatik\10.Semester\BA\emotion-recognition\case_dataset-master\data\non-interpolated\physiological"
         ),
         # NEUER OUTPUT-ORDNER, damit alte Ergebnisse nicht überschrieben werden
         out_dir=Path("outputs_cnn_noninterp_binary_inputsets"),
@@ -676,11 +676,36 @@ def main():
     if len(ecg_cols) > 0:
         input_sets["ecg_only"] = ecg_cols
 
-    # 5) Ohne RESP (falls vorhanden)
-    if any("resp" in c for c in lower_cols):
-        no_resp_cols = [c for c in channel_cols if "resp" not in c.lower()]
-        if len(no_resp_cols) > 0 and len(no_resp_cols) < len(channel_cols):
-            input_sets["no_resp"] = no_resp_cols
+    # 5) Ohne RSP (falls vorhanden)
+    if any("rsp" in c for c in lower_cols):
+        no_rsp_cols = [c for c in channel_cols if "rsp" not in c.lower()]
+        if len(no_rsp_cols) > 0 and len(no_rsp_cols) < len(channel_cols):
+            input_sets["no_rsp"] = no_rsp_cols
+
+    # 6) Ohne EDA / GSR (falls vorhanden)
+    if any("rsp" in c for c in lower_cols):
+        no_gsr_cols = [c for c in channel_cols if "gsr" not in c.lower()]
+        if len(no_gsr_cols) > 0 and len(no_gsr_cols) < len(channel_cols):
+            input_sets["no_gsr"] = no_gsr_cols
+
+    # 7) Ohne ECG (falls vorhanden)
+    if any("ecg" in c for c in lower_cols):
+        no_ecg_cols = [c for c in channel_cols if ("ecg" in c.lower())]
+        if len(no_ecg_cols) > 0:
+            input_sets["no_ecg"] = no_ecg_cols
+
+    # 8) Nur ECG, GSR, RSP, SKT (falls vorhanden)
+    combined_cols = [
+        c for c in channel_cols
+        if any(k in c.lower() for k in ("ecg", "gsr", "eda", "rsp", "skt"))
+    ]
+    if len(combined_cols) > 0:
+        input_sets["combined"] = combined_cols
+
+    # 9) Gesichtsmuskeln
+    face_cols = [c for c in channel_cols if any(k in c.lower() for k in ("emg_zygo", "emg_coru"))]
+    if len(face_cols) > 0:
+        input_sets["face"] = face_cols
 
     # Du kannst hier jederzeit noch manuell weitere Sets ergänzen,
     # z.B. nur bestimmte EMG-Kanäle etc.
