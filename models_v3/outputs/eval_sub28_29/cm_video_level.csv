@@ -1,0 +1,5 @@
+,amused,bored,relaxed,scary
+amused,1,0,0,1
+bored,1,0,0,1
+relaxed,2,0,0,0
+scary,0,0,0,2

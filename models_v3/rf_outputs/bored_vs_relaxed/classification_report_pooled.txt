@@ -1,0 +1,8 @@
+              precision    recall  f1-score   support
+
+       bored      0.505     0.533     0.519      1558
+     relaxed      0.531     0.502     0.516      1638
+
+    accuracy                          0.518      3196
+   macro avg      0.518     0.518     0.518      3196
+weighted avg      0.518     0.518     0.517      3196

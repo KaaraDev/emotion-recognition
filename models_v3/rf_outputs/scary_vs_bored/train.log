@@ -1,0 +1,50 @@
+2025-11-15 13:32:03 | INFO    | Logger ready.
+2025-11-15 13:32:03 | INFO    | Lade Feature-CSV aus outputs\features_case_bvp_gsr_skt.csv ...
+2025-11-15 13:32:03 | INFO    | Gelesen: 13692 Zeilen, 23 Spalten
+2025-11-15 13:32:03 | INFO    | Pausen (10/11/12) entfernt: 13692 -> 7112
+2025-11-15 13:32:03 | INFO    | Video->Label Mapping angewendet. Unmapped gedroppt: 7112 -> 7112
+2025-11-15 13:32:03 | INFO    | Filter auf Klassen ['scary', 'bored']: 7112 -> 3468 Zeilen
+2025-11-15 13:32:03 | INFO    | Vor Downsampling: {'scary': 1910, 'bored': 1558}
+2025-11-15 13:32:03 | INFO    | Klasse bored bereits <= target (1558 <= 1910)
+2025-11-15 13:32:03 | INFO    | Verwende 17 Feature-Spalten.
+2025-11-15 13:32:05 | INFO    | Fold 1/5: acc=0.7335 | bAcc=0.7210 | f1_macro=0.7230
+2025-11-15 13:32:05 | INFO    | Fold 1 done in 1.9s
+2025-11-15 13:32:07 | INFO    | Fold 2/5: acc=0.7039 | bAcc=0.6951 | f1_macro=0.6964
+2025-11-15 13:32:07 | INFO    | Fold 2 done in 1.9s
+2025-11-15 13:32:09 | INFO    | Fold 3/5: acc=0.8097 | bAcc=0.8029 | f1_macro=0.8054
+2025-11-15 13:32:09 | INFO    | Fold 3 done in 1.9s
+2025-11-15 13:32:11 | INFO    | Fold 4/5: acc=0.8194 | bAcc=0.8275 | f1_macro=0.8193
+2025-11-15 13:32:11 | INFO    | Fold 4 done in 2.0s
+2025-11-15 13:32:13 | INFO    | Fold 5/5: acc=0.6887 | bAcc=0.6805 | f1_macro=0.6816
+2025-11-15 13:32:13 | INFO    | Fold 5 done in 1.9s
+2025-11-15 13:32:13 | INFO    | == Pooled results over all folds ==
+2025-11-15 13:32:13 | INFO    | acc=0.7465 | bAcc=0.7404 | f1_macro=0.7418
+2025-11-15 13:32:13 | INFO    | CV fertig in 9.6s
+2025-11-15 13:32:15 | WARNING | Längen-Mismatch bei Feature Importances: len(feat_cols)=17, len(importances)=13. Schneide auf das Minimum zu.
+2025-11-15 13:32:15 | INFO    | Finales Modell gespeichert nach rf_outputs\scary_vs_bored\final_model_pipeline.joblib
+2025-11-15 13:32:15 | INFO    | Experiment scary_vs_bored fertig.
+2025-11-15 15:51:22 | INFO    | Logger ready.
+2025-11-15 15:51:22 | INFO    | Lade Feature-CSV aus outputs\features_case_bvp_gsr_skt.csv ...
+2025-11-15 15:51:22 | INFO    | Gelesen: 13692 Zeilen, 23 Spalten
+2025-11-15 15:51:22 | INFO    | Pausen (10/11/12) entfernt: 13692 -> 7112
+2025-11-15 15:51:22 | INFO    | Video->Label Mapping angewendet. Unmapped gedroppt: 7112 -> 7112
+2025-11-15 15:51:22 | INFO    | Filter auf Klassen ['scary', 'bored']: 7112 -> 3468 Zeilen
+2025-11-15 15:51:22 | INFO    | Vor Downsampling: {'scary': 1910, 'bored': 1558}
+2025-11-15 15:51:22 | INFO    | Klasse bored bereits <= target (1558 <= 1910)
+2025-11-15 15:51:22 | INFO    | Verwende 17 Feature-Spalten.
+2025-11-15 15:51:24 | INFO    | Fold 1/5: acc=0.7335 | bAcc=0.7210 | f1_macro=0.7230
+2025-11-15 15:51:24 | INFO    | Fold 1 done in 2.0s
+2025-11-15 15:51:26 | INFO    | Fold 2/5: acc=0.7039 | bAcc=0.6951 | f1_macro=0.6964
+2025-11-15 15:51:26 | INFO    | Fold 2 done in 2.0s
+2025-11-15 15:51:28 | INFO    | Fold 3/5: acc=0.8097 | bAcc=0.8029 | f1_macro=0.8054
+2025-11-15 15:51:28 | INFO    | Fold 3 done in 2.0s
+2025-11-15 15:51:30 | INFO    | Fold 4/5: acc=0.8194 | bAcc=0.8275 | f1_macro=0.8193
+2025-11-15 15:51:30 | INFO    | Fold 4 done in 2.1s
+2025-11-15 15:51:32 | INFO    | Fold 5/5: acc=0.6887 | bAcc=0.6805 | f1_macro=0.6816
+2025-11-15 15:51:32 | INFO    | Fold 5 done in 1.9s
+2025-11-15 15:51:32 | INFO    | == Pooled results over all folds ==
+2025-11-15 15:51:32 | INFO    | acc=0.7465 | bAcc=0.7404 | f1_macro=0.7418
+2025-11-15 15:51:32 | INFO    | CV fertig in 10.0s
+2025-11-15 15:51:34 | WARNING | Längen-Mismatch bei Feature Importances: len(feat_cols)=17, len(importances)=13. Schneide auf das Minimum zu.
+2025-11-15 15:51:34 | INFO    | Finales Modell gespeichert nach rf_outputs\scary_vs_bored\final_model_pipeline.joblib
+2025-11-15 15:51:34 | INFO    | Experiment scary_vs_bored fertig.

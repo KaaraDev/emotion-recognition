@@ -1,0 +1,8 @@
+Experiment: amusing_vs_boring__inputs=ecg_only
+Fold: 3
+
+Train-Subjekte:
+1, 2, 4, 5, 6, 7, 9, 10, 11, 12, 14, 15, 16, 17, 19, 20, 21, 22, 24, 25, 26, 27, 29, 30
+
+Val-Subjekte:
+3, 8, 13, 18, 23, 28

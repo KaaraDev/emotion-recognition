@@ -1,584 +1,407 @@
-# -*- coding: utf-8 -*-
+# train_rf_from_case_combined_plain_oof_preds.py
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, Set, List
+from pathlib import Path
+from typing import List, Dict, Any
+import json
+import logging
+import sys
+import time
+import random
 
 import numpy as np
 import pandas as pd
 
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import GroupKFold, LeaveOneGroupOut
-from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import GroupKFold
 from sklearn.metrics import (
-    accuracy_score,
-    balanced_accuracy_score,
-    f1_score,
-    classification_report,
-    confusion_matrix,
+    accuracy_score, f1_score, balanced_accuracy_score,
+    classification_report, confusion_matrix
 )
+from sklearn.ensemble import RandomForestClassifier
 import joblib
 
 
-# ----------------------------- Import Preprocessor -----------------------------
-from models.CaseDataPreprocessor import CaseDataPreprocessor
-
-
-# ====================== Random-Forest-Classifier-Wrapper ======================
+# ------------------- Konfiguration -------------------
 
 @dataclass
-class RFConfig:
-    n_estimators: int = 400
-    max_depth: Optional[int] = None
-    min_samples_leaf: int = 2
-    n_jobs: int = -1
+class TrainCfg:
+    csv_path: Path
+    out_dir: Path
     random_state: int = 42
+    log_level: str = "INFO"
+
+    # welche Videos raus?
+    exclude_pauses: bool = True
+    # GroupKFold folds
+    n_folds: int = 5
+    # bored (3/4) etwas runterstutzen
+    downsample_bored: bool = False
+    bored_target: str = "median"  # "min" oder "median"
+    classes_to_keep: List[str] | None = None
 
 
-class CaseRandomForestClassifier:
-    """
-    Klassifiziert Emotionen (z.B. Scary, Amusement, Boredom, …) auf Intervall-Ebene
-    und evaluiert zusätzlich auf Video-Ebene, indem alle Intervalle eines Videos
-    aggregiert werden (Summieren der Klassenwahrscheinlichkeiten → argmax).
+# Mapping wie in deinem alten Skript
+VIDEO_TO_LABEL = {
+    1: "amused",
+    2: "amused",
+    3: "bored",
+    4: "bored",
+    5: "relaxed",
+    6: "relaxed",
+    7: "scary",
+    8: "scary",
+}
+EXCLUDE_VIDEO_IDS = {10, 11, 12}
+EMOTIONS = ["amused", "bored", "relaxed", "scary"]
 
-    Labels kommen über ein Mapping von Video-ID → Emotionsname (EMO_MAP).
-    """
 
-    def __init__(
-        self,
-        preprocessor: CaseDataPreprocessor | None,
-        rf_config: RFConfig | None = None,
-        emo_map: Optional[Dict[int, str]] = None,
-        remove_videos: Optional[Set[int]] = None,   # global aus den Daten entfernen (z.B. Start/Blue/End)
-        exclude_subjects: Optional[Set[int]] = None,  # echter Holdout auf Subjektebene (z.B. {30})
-        class_weight: Optional[str] = "balanced",
-    ):
-        self.prep = preprocessor
-        self.config = rf_config or RFConfig()
-        self.emo_map: Dict[int, str] = emo_map or {}
-        self.remove_videos: Set[int] = set(remove_videos or set())
-        self.exclude_subjects: Set[int] = set(exclude_subjects or set())
-        self.class_weight = class_weight
+# ------------------- Logging -------------------
 
-        # Model & Encoder
-        self.model: Optional[RandomForestClassifier] = None
-        self.le_: Optional[LabelEncoder] = None
+def setup_logger(out_dir: Path, level: str = "INFO") -> logging.Logger:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger("rf_case")
+    logger.setLevel(getattr(logging, level.upper(), logging.INFO))
+    logger.handlers.clear()
 
-        # Data containers (Training/CV)
-        self.X_: Optional[pd.DataFrame] = None
-        self.y_int_: Optional[np.ndarray] = None  # integer-encoded labels
-        self.y_str_: Optional[np.ndarray] = None  # string labels
-        self.meta_: Optional[pd.DataFrame] = None
+    fmt = logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s",
+                            "%Y-%m-%d %H:%M:%S")
 
-        # Holdout (abgetrennte Subjekte)
-        self.X_hold_: Optional[pd.DataFrame] = None
-        self.y_hold_int_: Optional[np.ndarray] = None
-        self.y_hold_str_: Optional[np.ndarray] = None
-        self.meta_hold_: Optional[pd.DataFrame] = None
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+    sh.setLevel(getattr(logging, level.upper(), logging.INFO))
+    logger.addHandler(sh)
 
-    # --------------------------- Hilfsfunktionen ---------------------------
+    fh = logging.FileHandler(out_dir / "train.log", encoding="utf-8")
+    fh.setFormatter(fmt)
+    fh.setLevel(getattr(logging, level.upper(), logging.INFO))
+    logger.addHandler(fh)
 
-    def _labels_from_meta(self, meta: pd.DataFrame) -> np.ndarray:
-        assert "video" in meta.columns, "meta muss eine Spalte 'video' besitzen."
-        if not self.emo_map:
-            raise ValueError(
-                "emo_map ist leer. Übergib ein Dict {video_id: 'Emotion'} in den Konstruktor."
-            )
-        # Mappe Video-ID → Emotionsname
-        y_str = meta["video"].map(self.emo_map)
-        if y_str.isna().any():
-            missing = sorted(set(meta.loc[y_str.isna(), "video"].unique()))
-            raise ValueError(
-                f"Für folgende Video-IDs fehlt ein Label in emo_map: {missing}"
-            )
-        return y_str.values.astype(str)
+    logger.info("Logger ready.")
+    return logger
 
-    def _apply_global_video_filter(
-        self, X: pd.DataFrame, meta: pd.DataFrame
-    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """
-        Entfernt unerwünschte Videos (z.B. Start/Blue/End) global aus X und meta.
-        Wichtig: Labels werden erst NACH diesem Schritt erzeugt/encodiert.
-        """
-        if not self.remove_videos:
-            return X, meta
 
-        mask_keep = ~meta["video"].isin(self.remove_videos)
-        removed = (~mask_keep).sum()
-        if removed > 0:
-            print(
-                f"[FILTER] Entferne {removed} Intervalle mit Videos={sorted(self.remove_videos)} "
-                f"({len(set(meta.loc[~mask_keep, 'video']))} Video-IDs)."
-            )
-        X_f = X.loc[mask_keep].reset_index(drop=True)
-        meta_f = meta.loc[mask_keep].reset_index(drop=True)
-        return X_f, meta_f
+# ------------------- Daten laden -------------------
 
-    def _split_holdout_by_subject(
-        self, X: pd.DataFrame, y_int: np.ndarray, y_str: np.ndarray, meta: pd.DataFrame
-    ) -> Tuple[pd.DataFrame, np.ndarray, np.ndarray, pd.DataFrame]:
-        """Trennt Subjekte als Holdout ab (echtes Test-Set)."""
-        if not self.exclude_subjects:
-            return X, y_int, y_str, meta
+META_COLS = {"subject", "start_s", "end_s", "video"}
+LABEL_COLS = {"label_valence", "label_arousal"}
 
-        mask_hold = meta["subject"].isin(self.exclude_subjects).values
-        self.X_hold_ = X.loc[mask_hold].reset_index(drop=True)
-        self.y_hold_int_ = y_int[mask_hold]
-        self.y_hold_str_ = y_str[mask_hold]
-        self.meta_hold_ = meta.loc[mask_hold].reset_index(drop=True)
 
-        X = X.loc[~mask_hold].reset_index(drop=True)
-        y_int = y_int[~mask_hold]
-        y_str = y_str[~mask_hold]
-        meta = meta.loc[~mask_hold].reset_index(drop=True)
+def load_case_combined(path: Path, logger: logging.Logger) -> pd.DataFrame:
+    logger.info("Lade Features aus %s ...", path)
+    if path.suffix.endswith("gz") or path.suffix.endswith("csv"):
+        df = pd.read_csv(path)
+    elif path.suffix == ".parquet":
+        df = pd.read_parquet(path)
+    else:
+        raise ValueError(f"Unbekanntes Format: {path}")
+    logger.info("Gelesen: %d Zeilen, %d Spalten", len(df), df.shape[1])
+    return df
 
-        print(
-            f"[HOLDOUT] Subjekt(e) entfernt: {sorted(self.exclude_subjects)} | "
-            f"Intervalle={len(self.X_hold_)} | Videos={sorted(set(self.meta_hold_['video']))}"
+
+def attach_labels(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> pd.DataFrame:
+    if "video" not in df.columns:
+        raise ValueError("Spalte 'video' wird für das Mapping benötigt (steht in deinem combined drin).")
+    df = df.copy()
+
+    # Pausen raus
+    if cfg.exclude_pauses:
+        before = len(df)
+        df = df.loc[~df["video"].isin(EXCLUDE_VIDEO_IDS)]
+        logger.info("Pausen (10/11/12) entfernt: %d -> %d", before, len(df))
+
+    # Video -> Label
+    df["label"] = df["video"].map(VIDEO_TO_LABEL)
+    before_map = len(df)
+    df = df[df["label"].notna()].copy()
+    logger.info("Video->Label Mapping angewendet. Unmapped gedroppt: %d -> %d", before_map, len(df))
+
+    # sanity
+    if "subject" not in df.columns:
+        raise ValueError("Spalte 'subject' fehlt – wird für GroupKFold gebraucht.")
+    return df
+
+
+def downsample_class(df: pd.DataFrame, cls: str, cfg: TrainCfg, logger: logging.Logger) -> pd.DataFrame:
+    counts = df["label"].value_counts().to_dict()
+    logger.info("Vor Downsampling: %s", counts)
+    if cls not in counts:
+        return df
+    other_counts = [v for k, v in counts.items() if k != cls]
+    if not other_counts:
+        return df
+
+    if cfg.bored_target == "min":
+        target_n = int(min(other_counts))
+    else:
+        target_n = int(np.median(other_counts))
+
+    cur_n = counts[cls]
+    if cur_n <= target_n:
+        logger.info("Klasse %s bereits <= target (%d <= %d)", cls, cur_n, target_n)
+        return df
+
+    df_major = df[df["label"] != cls]
+    df_minor = df[df["label"] == cls].sample(n=target_n, random_state=cfg.random_state)
+    out = pd.concat([df_major, df_minor], axis=0).sample(frac=1.0, random_state=cfg.random_state).reset_index(drop=True)
+    logger.info("Nach Downsampling: %s", out["label"].value_counts().to_dict())
+    return out
+
+
+# ------------------- RF-Builder -------------------
+
+def build_rf(cfg: TrainCfg) -> RandomForestClassifier:
+    """Plain RF mit festen Hyperparametern."""
+    return RandomForestClassifier(
+        n_estimators=800,
+        max_depth=40,
+        min_samples_leaf=2,
+        max_features="sqrt",
+        n_jobs=-1,
+        random_state=cfg.random_state,
+        class_weight="balanced_subsample",
+    )
+
+
+# ------------------- CV & Training -------------------
+
+def run_group_cv(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> Dict[str, Any]:
+    # Feature-Spalten = alles, was nicht meta + nicht label
+    drop_cols = META_COLS | LABEL_COLS | {"label"}
+    candidate_feats = [c for c in df.columns if c not in drop_cols]
+
+    # komplett leere Spalten rausfiltern
+    non_empty_feats = []
+    empty_feats = []
+    for c in candidate_feats:
+        col = df[c]
+        if col.notna().any():
+            non_empty_feats.append(c)
+        else:
+            empty_feats.append(c)
+
+    if empty_feats:
+        logger.info(
+            "Ignoriere %d komplett leere Feature-Spalten: %s",
+            len(empty_feats),
+            empty_feats,
         )
-        return X, y_int, y_str, meta
 
-    def print_data_summary(self) -> None:
-        """Kleiner Überblick zu Train- und Holdout-Daten."""
-        def _summ(meta: Optional[pd.DataFrame], name: str) -> None:
-            if meta is None or len(meta) == 0:
-                print(f"[SUMMARY] {name}: leer")
-                return
-            n_int = len(meta)
-            n_subj = meta["subject"].nunique()
-            vids = sorted(meta["video"].unique())
-            print(f"[SUMMARY] {name}: Intervalle={n_int} | Subjekte={n_subj} | Videos={vids}")
+    feat_cols = non_empty_feats
+    logger.info("Verwende %d Feature-Spalten (ohne komplett leere).", len(feat_cols))
 
-        _summ(self.meta_, "TRAIN/CV")
-        _summ(self.meta_hold_, "HOLDOUT")
+    X = df[feat_cols].to_numpy(dtype=float)
+    y = df["label"].to_numpy()
+    groups = df["subject"].to_numpy()
 
-        if self.y_int_ is not None and self.le_ is not None:
-            cls, cnt = np.unique(self.y_int_, return_counts=True)
-            dist = {self.le_.classes_[i]: int(c) for i, c in zip(cls, cnt)}
-            print(f"[SUMMARY] Klassenverteilung (TRAIN/CV): {dist}")
-        if self.y_hold_int_ is not None and self.le_ is not None and len(self.y_hold_int_) > 0:
-            cls, cnt = np.unique(self.y_hold_int_, return_counts=True)
-            dist = {self.le_.classes_[i]: int(c) for i, c in zip(cls, cnt)}
-            print(f"[SUMMARY] Klassenverteilung (HOLDOUT): {dist}")
+    gkf = GroupKFold(n_splits=cfg.n_folds)
 
-    # --------------------------- Daten vorbereiten ---------------------------
+    all_true = []
+    all_pred = []
+    fold_rows = []
+    pred_rows = []  # out-of-fold Predictions für spätere Plots
 
-    def prepare_data(self) -> Tuple[pd.DataFrame, np.ndarray, pd.DataFrame]:
-        """
-        Nutzt den Preprocessor, entfernt unerwünschte Videos global,
-        encodiert Labels NACH dem Filter und trennt anschließend Subjekt-Holdout ab.
-        """
-        assert self.prep is not None, "Preprocessor fehlt."
-        X, yv, ya, meta = self.prep.prepare_all()  # yv/ya ungenutzt
+    best_fold = None
+    best_f1m = -np.inf
 
-        # 1) Unerwünschte Videos global entfernen
-        _ = self._labels_from_meta(meta)  # nur Validierung
-        X, meta = self._apply_global_video_filter(X, meta)
+    t0_all = time.perf_counter()
+    for fold, (tr_idx, va_idx) in enumerate(gkf.split(X, y, groups), start=1):
+        t0 = time.perf_counter()
 
-        # 2) Labels NACH dem Filter neu bilden + encoden
-        y_str = self._labels_from_meta(meta)
-        le = LabelEncoder()
-        y_int = le.fit_transform(y_str)
+        # --- Subjekte für Train/Val dokumentieren ---
+        train_subjects = [int(s) for s in sorted(np.unique(groups[tr_idx]))]
+        val_subjects = [int(s) for s in sorted(np.unique(groups[va_idx]))]
+        logger.info("Fold %d Train-Subjects: %s", fold, train_subjects)
+        logger.info("Fold %d Val-Subjects:   %s", fold, val_subjects)
 
-        # 3) Subjekt-Holdout abtrennen
-        X, y_int, y_str, meta = self._split_holdout_by_subject(X, y_int, y_str, meta)
+        # Plain Random Forest für diesen Fold
+        rf = build_rf(cfg)
+        rf.fit(X[tr_idx], y[tr_idx])
 
-        self.X_, self.y_int_, self.y_str_, self.meta_ = X, y_int, y_str, meta
-        self.le_ = le
-        return X, y_int, meta
+        # Vorhersage auf Val-Set
+        y_hat = rf.predict(X[va_idx])
+        if hasattr(rf, "predict_proba"):
+            y_proba = rf.predict_proba(X[va_idx])
+        else:
+            y_proba = None
 
-    # --------------------------- CV (Intervall + Video) ---------------------------
+        # Metriken
+        acc = accuracy_score(y[va_idx], y_hat)
+        bacc = balanced_accuracy_score(y[va_idx], y_hat)
+        f1m = f1_score(y[va_idx], y_hat, average="macro")
 
-    def cross_validate(self, n_splits: int = 5, verbose: bool = True) -> Dict[str, float]:
-        """
-        GroupKFold: Subjekt-weise K-Fold (mehrere Subjekte im Test pro Fold).
-        Für 'immer genau EIN Subjekt als Test' nutze cross_validate_loso().
-        """
-        assert self.X_ is not None and self.y_int_ is not None and self.meta_ is not None
-        groups = self.meta_["subject"].values
-        n_unique = np.unique(groups).size
-        if n_splits > n_unique:
-            raise ValueError(
-                f"n_splits={n_splits} > einzigartige Subjekte im Train={n_unique}. "
-                f"Bitte n_splits ≤ {n_unique} wählen."
-            )
+        logger.info(
+            "Fold %d/%d: acc=%.4f | bAcc=%.4f | f1_macro=%.4f",
+            fold, cfg.n_folds, acc, bacc, f1m
+        )
 
-        gkf = GroupKFold(n_splits=n_splits)
+        # Confusion Matrix & Report pro Fold
+        cm_labels = sorted(np.unique(np.concatenate([y[va_idx], y_hat])))
+        cm = confusion_matrix(y[va_idx], y_hat, labels=cm_labels)
+        cm_df = pd.DataFrame(cm, index=cm_labels, columns=cm_labels)
+        cm_df.to_csv(cfg.out_dir / f"cm_fold{fold}.csv", index=True)
 
-        interval_metrics = []  # (acc, bacc, f1)
-        video_metrics = []  # (acc, f1_macro)
+        with open(cfg.out_dir / f"report_fold{fold}.txt", "w", encoding="utf-8") as f:
+            f.write(classification_report(y[va_idx], y_hat, digits=3))
 
-        for fold, (tr, te) in enumerate(gkf.split(self.X_.values, self.y_int_, groups=groups), 1):
-            clf = RandomForestClassifier(
-                n_estimators=self.config.n_estimators,
-                max_depth=self.config.max_depth,
-                min_samples_leaf=self.config.min_samples_leaf,
-                n_jobs=self.config.n_jobs,
-                random_state=self.config.random_state,
-                class_weight=self.class_weight,
-            )
-            Xtr, Xte = self.X_.values[tr], self.X_.values[te]
-            ytr, yte = self.y_int_[tr], self.y_int_[te]
-            met_te = self.meta_.iloc[te]
+        # --- out-of-fold Predictions speichern ---
+        for i, idx in enumerate(va_idx):
+            row = {
+                "fold": fold,
+                "subject": df.iloc[idx]["subject"],
+                "video": df.iloc[idx]["video"],
+                "start_s": df.iloc[idx].get("start_s", np.nan),
+                "end_s": df.iloc[idx].get("end_s", np.nan),
+                "true_label": y[va_idx][i],
+                "pred_label": y_hat[i],
+            }
+            if y_proba is not None:
+                for class_idx, cls_name in enumerate(rf.classes_):
+                    row[f"proba_{cls_name}"] = float(y_proba[i, class_idx])
+            pred_rows.append(row)
+        # -----------------------------------------
 
-            clf.fit(Xtr, ytr)
-            y_pred = clf.predict(Xte)
-            y_proba = clf.predict_proba(Xte)
-
-            # Intervall-Ebene
-            acc = accuracy_score(yte, y_pred)
-            bacc = balanced_accuracy_score(yte, y_pred)
-            f1m = f1_score(yte, y_pred, average="macro")
-            interval_metrics.append((acc, bacc, f1m))
-
-            # Video-Ebene (pro (subject, video) aggregieren)
-            acc_v, f1m_v = self._video_level_scores(yte, y_proba, met_te)
-            video_metrics.append((acc_v, f1m_v))
-
-            if verbose:
-                subj_test = sorted(met_te["subject"].unique())
-                print(
-                    f"Fold {fold}: Intervalle  acc={acc:.3f}  bacc={bacc:.3f}  f1_macro={f1m:.3f} | "
-                    f"Videos  acc={acc_v:.3f}  f1_macro={f1m_v:.3f} | Test-Subjects={subj_test}"
-                )
-
-        # Mittelwerte
-        interval_arr = np.array(interval_metrics)
-        video_arr = np.array(video_metrics)
-        out = {
-            "interval_accuracy": float(interval_arr[:, 0].mean()),
-            "interval_bal_acc": float(interval_arr[:, 1].mean()),
-            "interval_f1_macro": float(interval_arr[:, 2].mean()),
-            "video_accuracy": float(video_arr[:, 0].mean()),
-            "video_f1_macro": float(video_arr[:, 1].mean()),
-        }
-        if verbose:
-            print("\n[CV] Mittelwerte:", {k: round(v, 4) for k, v in out.items()})
-        return out
-
-    def cross_validate_loso(self, verbose: bool = True) -> Dict[str, float]:
-        """
-        Leave-One-Subject-Out-CV (LOSO):
-        In jedem Fold wird genau EIN Subjekt als Testset gelassen.
-        Aggregiert Intervall- und Video-Level-Metriken über alle Folds.
-        """
-        assert self.X_ is not None and self.y_int_ is not None and self.meta_ is not None
-        groups = self.meta_["subject"].values
-        logo = LeaveOneGroupOut()
-
-        interval_metrics = []  # (acc, bacc, f1_macro)
-        video_metrics = []     # (acc, f1_macro)
-
-        for fold, (tr, te) in enumerate(logo.split(self.X_.values, self.y_int_, groups=groups), 1):
-            clf = RandomForestClassifier(
-                n_estimators=self.config.n_estimators,
-                max_depth=self.config.max_depth,
-                min_samples_leaf=self.config.min_samples_leaf,
-                n_jobs=self.config.n_jobs,
-                random_state=self.config.random_state,
-                class_weight=self.class_weight,
-            )
-            Xtr, Xte = self.X_.values[tr], self.X_.values[te]
-            ytr, yte = self.y_int_[tr], self.y_int_[te]
-            met_te = self.meta_.iloc[te]
-
-            clf.fit(Xtr, ytr)
-            y_pred = clf.predict(Xte)
-            y_proba = clf.predict_proba(Xte)
-
-            # Intervall-Ebene
-            acc = accuracy_score(yte, y_pred)
-            bacc = balanced_accuracy_score(yte, y_pred)
-            f1m = f1_score(yte, y_pred, average="macro")
-            interval_metrics.append((acc, bacc, f1m))
-
-            # Video-Ebene (pro (subject, video) aggregieren)
-            acc_v, f1m_v = self._video_level_scores(yte, y_proba, met_te)
-            video_metrics.append((acc_v, f1m_v))
-
-            if verbose:
-                subj_test = int(met_te["subject"].iloc[0]) if len(met_te) else -1
-                print(
-                    f"Fold {fold:02d} (Test-Subject {subj_test}): "
-                    f"Intervalle acc={acc:.3f} bacc={bacc:.3f} f1_macro={f1m:.3f} | "
-                    f"Videos acc={acc_v:.3f} f1_macro={f1m_v:.3f}"
-                )
-
-        interval_arr = np.array(interval_metrics)
-        video_arr = np.array(video_metrics)
-        out = {
-            "interval_accuracy": float(interval_arr[:, 0].mean()),
-            "interval_bal_acc": float(interval_arr[:, 1].mean()),
-            "interval_f1_macro": float(interval_arr[:, 2].mean()),
-            "video_accuracy": float(video_arr[:, 0].mean()),
-            "video_f1_macro": float(video_arr[:, 1].mean()),
-        }
-        if verbose:
-            print("\n[LOSO] Mittelwerte:", {k: round(v, 4) for k, v in out.items()})
-        return out
-
-    def _video_level_scores(
-        self,
-        y_true_int: np.ndarray,
-        y_proba: np.ndarray,
-        meta_subset: pd.DataFrame,
-    ) -> Tuple[float, float]:
-        """
-        Aggregiert per (subject, video) die Klassenwahrscheinlichkeiten (Summe),
-        sagt die Video-Emotion als argmax voraus und vergleicht mit dem wahren Label
-        (wir nehmen das häufigste Intervall-Label in diesem Video als Ground Truth).
-        Gibt (accuracy, f1_macro) zurück.
-        """
-        # Index pro Gruppe
-        grp_keys = list(zip(meta_subset["subject"].values, meta_subset["video"].values))
-        df = pd.DataFrame({
-            "subject": [s for s, _ in grp_keys],
-            "video": [v for _, v in grp_keys],
-            "y_true": y_true_int,
+        # Zeile für Gesamt-CSV
+        fold_rows.append({
+            "fold": fold,
+            "accuracy": acc,
+            "balanced_accuracy": bacc,
+            "f1_macro": f1m,
+            "n_train_samples": int(len(tr_idx)),
+            "n_val_samples": int(len(va_idx)),
+            "train_subjects": ",".join(map(str, train_subjects)),
+            "val_subjects": ",".join(map(str, val_subjects)),
         })
 
-        # Wahrscheinlichkeiten aufsummieren
-        proba_df = pd.DataFrame(y_proba)
-        proba_df["subject"] = df["subject"].values
-        proba_df["video"] = df["video"].values
+        all_true.append(y[va_idx])
+        all_pred.append(y_hat)
 
-        proba_sum = proba_df.groupby(["subject", "video"]).sum(numeric_only=True)
-        y_pred_video = proba_sum.values.argmax(axis=1)
+        # Bestes Fold tracken
+        if f1m > best_f1m:
+            best_f1m = f1m
+            best_fold = fold
 
-        # True-Label pro Video: Modus der Intervalle
-        y_true_video = (
-            df.groupby(["subject", "video"])["y_true"]
-              .agg(lambda x: np.bincount(x).argmax())
-              .values
+        elapsed = time.perf_counter() - t0
+        logger.info("Fold %d done in %.1fs", fold, elapsed)
+
+    # Pooled Ergebnisse
+    all_true = np.concatenate(all_true)
+    all_pred = np.concatenate(all_pred)
+
+    acc_all = accuracy_score(all_true, all_pred)
+    bacc_all = balanced_accuracy_score(all_true, all_pred)
+    f1m_all = f1_score(all_true, all_pred, average="macro")
+
+    logger.info("== Pooled results over all folds ==")
+    logger.info("acc=%.4f | bAcc=%.4f | f1_macro=%.4f", acc_all, bacc_all, f1m_all)
+
+    labels_sorted = sorted(np.unique(np.concatenate([all_true, all_pred])))
+    cm_all = confusion_matrix(all_true, all_pred, labels=labels_sorted)
+    pd.DataFrame(cm_all, index=labels_sorted, columns=labels_sorted) \
+        .to_csv(cfg.out_dir / "confusion_matrix_pooled.csv", index=True)
+
+    with open(cfg.out_dir / "classification_report_pooled.txt", "w", encoding="utf-8") as f:
+        f.write(classification_report(all_true, all_pred, digits=3))
+
+    # --- Zusammenfassungs-CSV mit allem drin ---
+    fold_df = pd.DataFrame(fold_rows)
+    if len(fold_df) > 0:
+        best_idx = fold_df["f1_macro"].idxmax()
+        fold_df["is_best"] = False
+        fold_df.loc[best_idx, "is_best"] = True
+    else:
+        fold_df["is_best"] = []
+
+    fold_df.to_csv(cfg.out_dir / "cv_folds_summary.csv", index=False)
+    logger.info("CV-Zusammenfassung gespeichert nach %s", cfg.out_dir / "cv_folds_summary.csv")
+    # --------------------------------------------
+
+    # --- out-of-fold Predictions speichern ---
+    pred_df = pd.DataFrame(pred_rows)
+    pred_path = cfg.out_dir / "cv_predictions.csv"
+    pred_df.to_csv(pred_path, index=False)
+    logger.info("CV-Predictions gespeichert nach %s", pred_path)
+    # -----------------------------------------
+
+    summary = {
+        "pooled_accuracy": float(acc_all),
+        "pooled_balanced_accuracy": float(bacc_all),
+        "pooled_f1_macro": float(f1m_all),
+        "feature_cols": feat_cols,
+        "best_fold": int(best_fold) if best_fold is not None else None,
+        "best_fold_f1_macro": float(best_f1m) if best_fold is not None else None,
+    }
+    with open(cfg.out_dir / "metrics_summary.json", "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+
+    logger.info("CV fertig in %.1fs", time.perf_counter() - t0_all)
+    if best_fold is not None:
+        logger.info("Bester Fold: %d mit f1_macro=%.4f", best_fold, best_f1m)
+
+    return summary
+
+
+# ------------------- main -------------------
+
+if __name__ == "__main__":
+    base_csv = Path("features_case_20w10s/combined.csv.gz")
+
+    experiments = [
+        ("scary_vs_amused", ["scary", "amused"]),
+        ("bored_vs_relaxed", ["bored", "relaxed"]),
+        ("scary_vs_bored", ["scary", "bored"]),
+        ("amused_vs_bored", ["amused", "bored"]),
+    ]
+
+    for exp_name, classes in experiments:
+        print(f"\n=== Starte Experiment: {exp_name} ({classes}) ===")
+
+        cfg = TrainCfg(
+            csv_path=base_csv,
+            out_dir=Path(f"outputs_20w10s_plain/{exp_name}"),
+            random_state=42,
+            classes_to_keep=classes,
         )
 
-        acc = accuracy_score(y_true_video, y_pred_video)
-        f1m = f1_score(y_true_video, y_pred_video, average="macro")
-        return acc, f1m
+        np.random.seed(cfg.random_state)
+        random.seed(cfg.random_state)
 
-    # ------------------------------ Training ------------------------------
+        logger = setup_logger(cfg.out_dir, cfg.log_level)
 
-    def fit(self, verbose: bool = True) -> RandomForestClassifier:
-        assert self.X_ is not None and self.y_int_ is not None
-        self.model = RandomForestClassifier(
-            n_estimators=self.config.n_estimators,
-            max_depth=self.config.max_depth,
-            min_samples_leaf=self.config.min_samples_leaf,
-            n_jobs=self.config.n_jobs,
-            random_state=self.config.random_state,
-            class_weight=self.class_weight,
-        )
-        self.model.fit(self.X_.values, self.y_int_)
-        if verbose:
-            n, d = self.X_.shape
-            print(f"[FIT] RandomForestClassifier trainiert auf {n} Fenstern mit {d} Features.")
-        return self.model
+        df = load_case_combined(cfg.csv_path, logger)
+        df = attach_labels(df, cfg, logger)
 
-    # --------------------------- Inferenz / Utils ---------------------------
-
-    def predict(self, X_new: pd.DataFrame | np.ndarray) -> np.ndarray:
-        assert self.model is not None
-        Xv = X_new.values if isinstance(X_new, pd.DataFrame) else X_new
-        return self.model.predict(Xv)
-
-    def predict_proba(self, X_new: pd.DataFrame | np.ndarray) -> np.ndarray:
-        assert self.model is not None
-        Xv = X_new.values if isinstance(X_new, pd.DataFrame) else X_new
-        return self.model.predict_proba(Xv)
-
-    def feature_importance(self, top_k: int | None = 20) -> pd.Series:
-        assert self.model is not None and self.X_ is not None
-        fi = pd.Series(self.model.feature_importances_, index=self.X_.columns).sort_values(ascending=False)
-        return fi.head(top_k) if top_k is not None else fi
-
-    # ------------------------------ Holdout-Test ------------------------------
-
-    def evaluate_holdout(self, verbose_report: bool = True) -> Dict[str, float]:
-        assert self.model is not None, "Bitte zuerst fit() aufrufen."
-        assert self.X_hold_ is not None and len(self.X_hold_) > 0, "Kein Holdout vorhanden."
-
-        y_pred = self.predict(self.X_hold_)
-        y_proba = self.predict_proba(self.X_hold_)
-
-        # Intervall
-        acc = accuracy_score(self.y_hold_int_, y_pred)
-        bacc = balanced_accuracy_score(self.y_hold_int_, y_pred)
-        f1m = f1_score(self.y_hold_int_, y_pred, average="macro")
-
-        # Video
-        acc_v, f1m_v = self._video_level_scores(self.y_hold_int_, y_proba, self.meta_hold_)
-
-        out = {
-            "interval_accuracy": float(acc),
-            "interval_bal_acc": float(bacc),
-            "interval_f1_macro": float(f1m),
-            "video_accuracy": float(acc_v),
-            "video_f1_macro": float(f1m_v),
-        }
-        print("\n[HOLDOUT] Scores:", {k: round(v, 4) for k, v in out.items()})
-
-        if verbose_report and self.le_ is not None:
-            print("\n[HOLDOUT] classification_report (Intervalle):")
-            print(classification_report(self.y_hold_int_, y_pred, target_names=list(self.le_.classes_)))
-            print("[HOLDOUT] confusion_matrix (Intervalle):")
-            print(confusion_matrix(self.y_hold_int_, y_pred))
-
-        return out
-
-    # ------------------------------ Persistenz ------------------------------
-
-    def save(self, path: str | bytes | "os.PathLike[str]") -> None:
-        assert self.model is not None and self.le_ is not None
-        joblib.dump(
-            {
-                "model": self.model,
-                "feature_names": None if self.X_ is None else list(self.X_.columns),
-                "rf_config": self.config,
-                "classes_": self.le_.classes_.tolist(),
-                "emo_map": self.emo_map,
-            },
-            path,
-        )
-        print(f"[SAVE] Klassifikationsmodell gespeichert unter: {path}")
-
-    @staticmethod
-    def load(path: str | bytes | "os.PathLike[str]") -> "CaseRandomForestClassifier":
-        bundle = joblib.load(path)
-        obj = CaseRandomForestClassifier(
-            preprocessor=None,
-            rf_config=bundle.get("rf_config", RFConfig()),
-            emo_map=bundle.get("emo_map", {}),
-        )
-        obj.model = bundle["model"]
-        if "feature_names" in bundle:
-            obj.X_ = pd.DataFrame(columns=bundle["feature_names"])  # nur Namen parken
-        le = LabelEncoder()
-        if "classes_" in bundle:
-            le.fit(bundle["classes_"])  # nur zum Transport der Klassenreihenfolge
-        obj.le_ = le
-        print(f"[LOAD] Klassifikationsmodell geladen von: {path}")
-        return obj
-
-    # ---------------------- Laden aus gespeicherten Features ----------------------
-
-    def load_prepared_from_dir(
-        self,
-        features_dir: str = "features_case_10w1s",
-        combined_basename: str = "combined",
-        prefer_parquet: bool = True,
-    ) -> Tuple[pd.DataFrame, np.ndarray, pd.DataFrame]:
-        """
-        Lädt gespeicherte Features (+Labels+Meta) aus features_dir/combined.(parquet|csv.gz),
-        entfernt unerwünschte Videos global, erstellt y aus meta['video'] via self.emo_map,
-        trennt Subjekt-Holdout ab. Rückgabe: (X, y_int, meta) – bereit für CV/Training.
-        """
-        import os
-        dir_path = os.path.abspath(features_dir)
-        pq = os.path.join(dir_path, f"{combined_basename}.parquet")
-        gz = os.path.join(dir_path, f"{combined_basename}.csv.gz")
-
-        # 1) Combined-Datei laden
-        if prefer_parquet and os.path.exists(pq):
-            df = pd.read_parquet(pq)
-            print(f"[LOAD] Loaded Parquet: {pq}  shape={df.shape}")
-        elif os.path.exists(gz):
-            df = pd.read_csv(gz)
-            print(f"[LOAD] Loaded CSV.GZ:  {gz}  shape={df.shape}")
-        else:
-            raise FileNotFoundError(
-                f"Keine Combined-Datei gefunden in {dir_path} "
-                f"(erwartet: {combined_basename}.parquet oder {combined_basename}.csv.gz)."
+        # Nur die Klassen für dieses Experiment behalten
+        if cfg.classes_to_keep is not None:
+            before = len(df)
+            df = df[df["label"].isin(cfg.classes_to_keep)].copy()
+            logger.info(
+                "Filter auf Klassen %s: %d -> %d Zeilen",
+                cfg.classes_to_keep, before, len(df)
             )
 
-        # 2) Spalten trennen
-        required_meta = ["subject", "start_s", "end_s", "video"]
-        for c in required_meta:
-            if c not in df.columns:
-                raise ValueError(f"Spalte '{c}' fehlt in der Combined-Datei.")
+        # Downsampling bored nur, wenn bored überhaupt vorkommt
+        if cfg.downsample_bored and "bored" in (cfg.classes_to_keep or EMOTIONS):
+            if "bored" in df["label"].unique():
+                df = downsample_class(df, "bored", cfg, logger)
 
-        label_cols = ["label_valence", "label_arousal"]
-        for c in label_cols:
-            if c not in df.columns:
-                raise ValueError(f"Spalte '{c}' (Label) fehlt in der Combined-Datei.")
+        # GroupKFold-CV nur zur Performance-Schätzung
+        summary = run_group_cv(df, cfg, logger)
+        feat_cols = summary.get("feature_cols", [])
 
-        meta = df[required_meta].copy()
-        # Features = alles außer Meta + Labelspalten
-        drop_cols = set(required_meta + label_cols)
-        X = df.drop(columns=[c for c in df.columns if c in drop_cols]).copy()
+        # Finales Modell auf ALLEN Daten trainieren (so macht man es typisch)
+        if len(feat_cols) > 0:
+            X_all = df[feat_cols].to_numpy(dtype=float)
+            y_all = df["label"].to_numpy()
 
-        # 3) Videos global entfernen (Blue/Start/End etc.)
-        _ = self._labels_from_meta(meta)  # nur Validierung
-        X, meta = self._apply_global_video_filter(X, meta)
+            rf_final = build_rf(cfg)
+            rf_final.fit(X_all, y_all)
 
-        # 4) Klassenlabels aus Video→Emotion (emo_map) NACH Filterung
-        y_str = self._labels_from_meta(meta)
-        le = LabelEncoder()
-        y_int = le.fit_transform(y_str)
+            final_model_path = cfg.out_dir / "final_model.joblib"
+            joblib.dump(rf_final, final_model_path)
+            logger.info("Finales Modell gespeichert nach %s", final_model_path)
 
-        # 5) Subjekt-Holdout abtrennen
-        X, y_int, y_str, meta = self._split_holdout_by_subject(X, y_int, y_str, meta)
+            # verwendete Features speichern
+            with open(cfg.out_dir / "used_features.json", "w", encoding="utf-8") as f:
+                json.dump(feat_cols, f, indent=2)
 
-        # 6) Im Wrapper parken
-        self.X_, self.y_int_, self.y_str_, self.meta_ = X, y_int, y_str, meta
-        self.le_ = le
-        print(f"[READY] TRAIN: X={X.shape}, y={y_int.shape}, meta={meta.shape}")
-        return X, y_int, meta
-
-
-# ============================== Beispiel-Usage ==============================
-if __name__ == "__main__":
-    # Mapping: Video-ID → Emotionsname (bitte ggf. anpassen!)
-    EMO_MAP = {
-        1: "Amusement", 2: "Amusement",
-        3: "Boredom",   4: "Boredom",
-        5: "Relaxed",   6: "Relaxed",
-        7: "Scary",     8: "Scary",
-        10: "Start", 11: "Blue", 12: "End",
-        # Falls weitere Video-IDs vorkommen, hier ergänzen.
-    }
-
-    rf_cfg = RFConfig(
-        n_estimators=400,
-        min_samples_leaf=2,
-        max_depth=None,
-        n_jobs=-1,
-        random_state=42
-    )
-
-    # Preprocessor ist NICHT nötig – wir laden aus Dateien
-    clfw = CaseRandomForestClassifier(
-        preprocessor=None,
-        rf_config=rf_cfg,
-        emo_map=EMO_MAP,
-        remove_videos={10, 11, 12},  # global raus (Blue/Start/End)
-        exclude_subjects={30},       # echter Holdout (Subjekt 30); wird nicht in CV genutzt
-        class_weight="balanced",
-    )
-
-    print("[INFO] Lade gespeicherte Features …")
-    X, y, meta = clfw.load_prepared_from_dir(
-        features_dir="features_case_10w1s",     # ggf. Pfad anpassen
-        combined_basename="combined",     # falls du anders benannt hast
-        prefer_parquet=True               # auf False setzen, wenn kein pyarrow installiert
-    )
-
-    clfw.print_data_summary()
-
-    # ---------- Leave-One-Subject-Out (LOSO) ----------
-    print("[INFO] Starte Leave-One-Subject-Out (LOSO) …")
-    clfw.cross_validate_loso(verbose=True)
-
-    # Optional zusätzlich: klassische GroupKFold-5-Fold CV
-    # print("[INFO] Starte subjekt-weise 5-Fold GroupKFold CV …")
-    # clfw.cross_validate(n_splits=5, verbose=True)
-
-    print("[INFO] Trainiere finales Modell auf TRAIN/CV …")
-    clfw.fit()
-
-    print("\n[TOP-Feature-Importances]")
-    print(clfw.feature_importance(top_k=20).to_string())
-
-    # Eval nur auf Subjekt-Holdout (falls vorhanden)
-    if clfw.X_hold_ is not None and len(clfw.X_hold_) > 0:
-        clfw.evaluate_holdout(verbose_report=True)
-
-    clfw.save("rf_emotion_classifier_from_saved_features.joblib")
+        logger.info("Experiment %s fertig.", exp_name)

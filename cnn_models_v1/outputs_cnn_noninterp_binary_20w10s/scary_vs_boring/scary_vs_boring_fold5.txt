@@ -1,0 +1,36 @@
+Experiment: scary_vs_boring
+Fold: 5
+
+Positive class (1): scary
+Negative class (0): boring
+
+Config:
+  window_size_s = 20
+  step_size_s   = 10
+  target_fs     = 1000
+  min_samples_in_window = 5
+  batch_size    = 64
+  num_epochs    = 60
+  lr            = 0.0005
+  weight_decay  = 1e-05
+  early_stopping_patience = 7
+  n_splits      = 5
+
+Best validation accuracy: 0.7440
+Final val_loss (best model re-eval): 0.7389
+Final val_acc  (best model re-eval): 0.7440
+
+Training samples:   1344
+Validation samples: 336
+
+Class counts (train):
+  Label 0 (boring): 600
+  Label 1 (scary): 744
+
+Class counts (val):
+  Label 0 (boring): 150
+  Label 1 (scary): 186
+
+Confusion matrix (rows=true, cols=pred) [0,1]:
+   119   31
+    55  131

@@ -272,12 +272,11 @@ def run_group_cv(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> Dic
     drop_cols = META_COLS | LABEL_COLS | {"label"}
     candidate_feats = [c for c in df.columns if c not in drop_cols]
 
-    # >>> NEU: komplett leere Spalten rausfiltern
+    # komplett leere Spalten rausfiltern
     non_empty_feats = []
     empty_feats = []
     for c in candidate_feats:
         col = df[c]
-        # "komplett leer" = nur NaN
         if col.notna().any():
             non_empty_feats.append(c)
         else:
@@ -292,7 +291,6 @@ def run_group_cv(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> Dic
 
     feat_cols = non_empty_feats
     logger.info("Verwende %d Feature-Spalten (ohne komplett leere).", len(feat_cols))
-    # <<< ENDE NEU
 
     X = df[feat_cols].to_numpy(dtype=float)
     y = df["label"].to_numpy()
@@ -304,13 +302,28 @@ def run_group_cv(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> Dic
     all_pred = []
     fold_rows = []
 
+    # Bestes Fold (z.B. nach f1_macro)
+    best_fold = None
+    best_f1m = -np.inf
+
     t0_all = time.perf_counter()
     for fold, (tr_idx, va_idx) in enumerate(gkf.split(X, y, groups), start=1):
         t0 = time.perf_counter()
+
+        # --- Subjekte für Train/Val dokumentieren ---
+        train_subjects = [int(s) for s in sorted(np.unique(groups[tr_idx]))]
+        val_subjects = [int(s) for s in sorted(np.unique(groups[va_idx]))]
+        logger.info("Fold %d Train-Subjects: %s", fold, train_subjects)
+        logger.info("Fold %d Val-Subjects:   %s", fold, val_subjects)
+
+        # Modell für diesen Fold bauen & trainieren
         pipe = build_pipeline(cfg)
         pipe.fit(X[tr_idx], y[tr_idx])
+
+        # Modell vorhersagen lassen auf Val-Set
         y_hat = pipe.predict(X[va_idx])
 
+        # Metriken
         acc = accuracy_score(y[va_idx], y_hat)
         bacc = balanced_accuracy_score(y[va_idx], y_hat)
         f1m = f1_score(y[va_idx], y_hat, average="macro")
@@ -320,6 +333,7 @@ def run_group_cv(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> Dic
             fold, cfg.n_folds, acc, bacc, f1m
         )
 
+        # Confusion Matrix & Report pro Fold
         cm_labels = sorted(np.unique(np.concatenate([y[va_idx], y_hat])))
         cm = confusion_matrix(y[va_idx], y_hat, labels=cm_labels)
         cm_df = pd.DataFrame(cm, index=cm_labels, columns=cm_labels)
@@ -328,19 +342,37 @@ def run_group_cv(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> Dic
         with open(cfg.out_dir / f"report_fold{fold}.txt", "w", encoding="utf-8") as f:
             f.write(classification_report(y[va_idx], y_hat, digits=3))
 
+        # --- Modell dieses Folds speichern ---
+        fold_model_path = cfg.out_dir / f"fold{fold}.joblib"
+        joblib.dump(pipe, fold_model_path)
+        logger.info("Fold-%d-Modell gespeichert nach %s", fold, fold_model_path)
+        # ------------------------------------
+
+        # Zeile für Gesamt-CSV
         fold_rows.append({
             "fold": fold,
             "accuracy": acc,
             "balanced_accuracy": bacc,
-            "f1_macro": f1m
+            "f1_macro": f1m,
+            "n_train_samples": int(len(tr_idx)),
+            "n_val_samples": int(len(va_idx)),
+            "train_subjects": ",".join(map(str, train_subjects)),
+            "val_subjects": ",".join(map(str, val_subjects)),
+            "model_path": str(fold_model_path),
         })
 
         all_true.append(y[va_idx])
         all_pred.append(y_hat)
 
+        # Bestes Fold tracken
+        if f1m > best_f1m:
+            best_f1m = f1m
+            best_fold = fold
+
         elapsed = time.perf_counter() - t0
         logger.info("Fold %d done in %.1fs", fold, elapsed)
 
+    # Pooled Ergebnisse
     all_true = np.concatenate(all_true)
     all_pred = np.concatenate(all_pred)
 
@@ -359,51 +391,41 @@ def run_group_cv(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> Dic
     with open(cfg.out_dir / "classification_report_pooled.txt", "w", encoding="utf-8") as f:
         f.write(classification_report(all_true, all_pred, digits=3))
 
+    # --- Zusammenfassungs-CSV mit allem drin ---
     fold_df = pd.DataFrame(fold_rows)
-    fold_df.to_csv(cfg.out_dir / "metrics_per_fold.csv", index=False)
+    if len(fold_df) > 0:
+        best_idx = fold_df["f1_macro"].idxmax()
+        fold_df["is_best"] = False
+        fold_df.loc[best_idx, "is_best"] = True
+    else:
+        fold_df["is_best"] = []
+
+    fold_df.to_csv(cfg.out_dir / "cv_folds_summary.csv", index=False)
+    logger.info("CV-Zusammenfassung gespeichert nach %s", cfg.out_dir / "cv_folds_summary.csv")
+    # --------------------------------------------
 
     summary = {
         "pooled_accuracy": float(acc_all),
         "pooled_balanced_accuracy": float(bacc_all),
         "pooled_f1_macro": float(f1m_all),
-        "accuracy_mean": float(fold_df["accuracy"].mean()),
-        "accuracy_std": float(fold_df["accuracy"].std(ddof=1)) if len(fold_df) > 1 else 0.0,
-        "balanced_accuracy_mean": float(fold_df["balanced_accuracy"].mean()),
-        "balanced_accuracy_std": float(fold_df["balanced_accuracy"].std(ddof=1)) if len(fold_df) > 1 else 0.0,
-        "f1_macro_mean": float(fold_df["f1_macro"].mean()),
-        "f1_macro_std": float(fold_df["f1_macro"].std(ddof=1)) if len(fold_df) > 1 else 0.0,
         "feature_cols": feat_cols,
+        "best_fold": int(best_fold) if best_fold is not None else None,
+        "best_fold_f1_macro": float(best_f1m) if best_fold is not None else None,
     }
     with open(cfg.out_dir / "metrics_summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
     logger.info("CV fertig in %.1fs", time.perf_counter() - t0_all)
+    if best_fold is not None:
+        logger.info("Bester Fold: %d mit f1_macro=%.4f", best_fold, best_f1m)
+
     return summary
-
-
-def refit_final(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger, feat_cols: List[str]):
-    X_all = df[feat_cols].to_numpy(dtype=float)
-    y_all = df["label"].to_numpy()
-
-    pipe = build_pipeline(cfg)
-    pipe.fit(X_all, y_all)
-
-    # Feature Importance vom RF
-    rf = pipe.named_steps["rf"]
-    imp_df = pd.DataFrame({
-        "feature": feat_cols,
-        "importance": rf.feature_importances_
-    }).sort_values("importance", ascending=False)
-    imp_df.to_csv(cfg.out_dir / "feature_importance.csv", index=False)
-
-    joblib.dump(pipe, cfg.out_dir / "final_model_pipeline.joblib")
-    logger.info("Finales Modell gespeichert nach %s", cfg.out_dir / "final_model_pipeline.joblib")
 
 
 # ------------------- main -------------------
 
 if __name__ == "__main__":
-    base_csv = Path("features_case_90w30s/combined.csv.gz")
+    base_csv = Path("features_case_60w30s/combined.csv.gz")
 
     experiments = [
         ("scary_vs_amused", ["scary", "amused"]),
@@ -417,7 +439,7 @@ if __name__ == "__main__":
 
         cfg = TrainCfg(
             csv_path=base_csv,
-            out_dir=Path(f"outputs_90w30s/{exp_name}"),
+            out_dir=Path(f"outputs_60w30s/{exp_name}"),
             random_state=42,
             classes_to_keep=classes,
         )
@@ -445,8 +467,7 @@ if __name__ == "__main__":
                 df = downsample_class(df, "bored", cfg, logger)
 
         summary = run_group_cv(df, cfg, logger)
-        feat_cols = summary["feature_cols"]
-        refit_final(df, cfg, logger, feat_cols)
+        feat_cols = summary.get("feature_cols", [])
 
         with open(cfg.out_dir / "used_features.json", "w", encoding="utf-8") as f:
             json.dump(feat_cols, f, indent=2)

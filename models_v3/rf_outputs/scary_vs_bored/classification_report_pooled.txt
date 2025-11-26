@@ -1,0 +1,8 @@
+              precision    recall  f1-score   support
+
+       bored      0.736     0.680     0.707      1558
+       scary      0.754     0.801     0.777      1910
+
+    accuracy                          0.747      3468
+   macro avg      0.745     0.740     0.742      3468
+weighted avg      0.746     0.747     0.745      3468

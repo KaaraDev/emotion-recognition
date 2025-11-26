@@ -1,554 +1,243 @@
-# -*- coding: utf-8 -*-
+# plot_rf_scary_vs_boring_from_cv.py
 
-import json
-import logging
+from __future__ import annotations
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import List, Dict, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import (
-    accuracy_score,
-    balanced_accuracy_score,
-    f1_score,
-    classification_report,
-    confusion_matrix
-)
-import joblib
+import matplotlib.pyplot as plt
 
-# ---------------------------------------------------------
-# AdaptiveSMOTE muss VOR joblib.load() definiert sein
-# (exakt gleicher Name wie im Training!)
-# ---------------------------------------------------------
-from imblearn.base import BaseSampler
-from sklearn.base import clone
-from sklearn.utils._param_validation import Interval
-from numbers import Integral
 
+# ----------------------------------------------------------
+# Konfiguration
+# ----------------------------------------------------------
 
-class AdaptiveSMOTE(BaseSampler):
-    """
-    SMOTE/BorderlineSMOTE/SVMSMOTE mit adaptivem k und sicheren Fallbacks:
-    - Wenn im Train-Fold < 2 Klassen vorhanden: no-op.
-    - Wenn kleinste Klasse <= 1: no-op.
-    - k_neighbors wird an die kleinste Klasse angepasst.
-    - Wenn der interne Sampler trotzdem wirft: no-op.
-    """
-    _parameter_constraints = {
-        "base_smote": [object],
-        "min_k": [Interval(Integral, 1, None, closed="left")],
-        "sampling_strategy": [object],
-    }
-    _sampling_type = "over-sampling"
+@dataclass
+class PlotCfg:
+    cv_pred_path: Path      # Pfad zu cv_predictions.csv
+    out_dir: Path           # Ordner für Plots
 
-    def __init__(self, base_smote, min_k=3, sampling_strategy="auto"):
-        self.base_smote = base_smote
-        self.min_k = min_k
-        self.sampling_strategy = sampling_strategy
-        self._effective_smote_ = None
-        self._disabled_ = False
+    exp_pos: str = "scary"  # positive Klasse
+    exp_neg: str = "bored"  # negative Klasse
 
-    def _fit_resample(self, X, y):
-        y_arr = np.asarray(y)
 
-        # 1) zu wenig Klassen -> nichts tun
-        classes, counts = np.unique(y_arr, return_counts=True)
-        if classes.size < 2:
-            self._disabled_ = True
-            self._effective_smote_ = None
-            return X, y
+# ----------------------------------------------------------
+# Laden der CV-Predictions
+# ----------------------------------------------------------
 
-        min_count = int(counts.min())
-        # 2) kleinste Klasse hat nur 1 Sample -> nichts tun
-        if min_count <= 1:
-            self._disabled_ = True
-            self._effective_smote_ = None
-            return X, y
+def load_cv_predictions(path: Path) -> pd.DataFrame:
+    if not path.is_file():
+        raise FileNotFoundError(f"cv_predictions.csv nicht gefunden unter {path}")
+    df = pd.read_csv(path)
+    required_cols = {"fold", "subject", "video", "start_s", "end_s",
+                     "true_label", "pred_label"}
+    missing = required_cols - set(df.columns)
+    if missing:
+        raise ValueError(f"Fehlende Spalten in {path}: {missing}")
+    return df
 
-        # 3) k so wählen, dass es zur kleinsten Klasse passt
-        max_k = max(1, min_count - 1)
-        k = max(1, min(self.min_k, max_k))
 
-        smote = clone(self.base_smote)
-        set_params = {
-            "k_neighbors": k,
-            "sampling_strategy": self.sampling_strategy,
-        }
-        if hasattr(smote, "m_neighbors"):
-            set_params["m_neighbors"] = min(getattr(smote, "m_neighbors", 10), k, max_k)
-        if hasattr(smote, "n_neighbors"):
-            set_params["n_neighbors"] = min(getattr(smote, "n_neighbors", 5), k, max_k)
+# ----------------------------------------------------------
+# Plotten für mehrere Subjects
+# ----------------------------------------------------------
 
-        smote.set_params(**set_params)
+def plot_subjects(cfg: PlotCfg, subjects: List[int]) -> None:
+    print(f"Lade OOF-Predictions aus {cfg.cv_pred_path} ...")
+    df = load_cv_predictions(cfg.cv_pred_path)
 
-        try:
-            X_res, y_res = smote.fit_resample(X, y)
-            self._effective_smote_ = smote
-            self._disabled_ = False
-            return X_res, y_res
-        except Exception as e:
-            logging.getLogger("rf_case_eval_all").warning(
-                "AdaptiveSMOTE: fallback to no-op (k=%d, classes=%s, counts=%s): %r",
-                k, classes.tolist(), counts.tolist(), e
-            )
-            self._disabled_ = True
-            self._effective_smote_ = None
-            return X, y
+    # Nur die relevanten Klassen (Exp) behalten, falls andere drin sind
+    mask_classes = df["true_label"].isin([cfg.exp_pos, cfg.exp_neg])
+    df = df[mask_classes].copy()
 
+    cfg.out_dir.mkdir(parents=True, exist_ok=True)
 
-# ---------------------------------------------------------
-# Konstanten & Helper wie im Training
-# ---------------------------------------------------------
-
-# Video -> Emotion Mapping (wie in train_rf_from_case_combined.py)
-VIDEO_TO_LABEL = {
-    1: "amused",
-    2: "amused",
-    3: "bored",
-    4: "bored",
-    5: "relaxed",
-    6: "relaxed",
-    7: "scary",
-    8: "scary",
-    # Pausen können im combined trotzdem vorkommen
-    10: None,
-    11: None,
-    12: None,
-}
-
-META_COLS = {"subject", "start_s", "end_s", "video"}
-LABEL_COLS = {"label_valence", "label_arousal"}
-
-
-def _majority_label(labels: pd.Series) -> str:
-    """
-    Mehrheit der Labels in einer Gruppe,
-    bei Tie alphabetisch deterministisch,
-    sonst fallback 'bored' falls leer.
-    """
-    counts = labels.value_counts()
-    if counts.empty:
-        return "bored"
-    max_n = counts.max()
-    tied = sorted(counts[counts == max_n].index.tolist())
-    return tied[0]
-
-
-# ---------------------------------------------------------
-# Logger Helper
-# ---------------------------------------------------------
-
-def make_logger() -> logging.Logger:
-    logger = logging.getLogger("rf_case_eval_all")
-    if logger.handlers:
-        return logger  # schon konfiguriert
-
-    logger.setLevel(logging.INFO)
-
-    fmt = logging.Formatter(
-        "%(asctime)s | %(levelname)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
-
-    sh = logging.StreamHandler()
-    sh.setFormatter(fmt)
-    sh.setLevel(logging.INFO)
-
-    logger.addHandler(sh)
-    return logger
-
-
-# ---------------------------------------------------------
-# Evaluator-Klasse (wie vorher, leicht angepasst)
-# ---------------------------------------------------------
-
-class VideoLabelEvaluatorCase:
-    def __init__(
-        self,
-        model_path: Path,
-        df_full: pd.DataFrame,
-        subjects_to_test: List[int],
-        out_dir: Path,
-        classes_to_keep: Optional[List[str]] = None,
-        logger: logging.Logger = None
-    ):
-        """
-        model_path:
-            Pfad zur gespeicherten Pipeline (final_model_pipeline.joblib),
-            wie sie von train_rf_from_case_combined.py erzeugt wird.
-
-        df_full:
-            kompletter Datensatz (alle Subjects),
-            muss mindestens enthalten:
-              - 'subject'
-              - 'video'
-              - alle Feature-Spalten
-
-        subjects_to_test:
-            Liste mit Subject-IDs, die evaluiert werden sollen
-
-        classes_to_keep:
-            Optional: Liste von Klassen, auf die gefiltert werden soll,
-            z.B. ["scary", "amused"] passend zu einem Experiment.
-
-        out_dir:
-            Ausgabe-Ordner für Reports
-        """
-        self.logger = logger or make_logger()
-
-        self.model_path = Path(model_path)
-        self.out_dir = Path(out_dir)
-        self.out_dir.mkdir(parents=True, exist_ok=True)
-
-        self.classes_to_keep = classes_to_keep
-
-        self.logger.info("Loading model from %s", self.model_path)
-        loaded_obj = joblib.load(self.model_path)
-
-        # A) komplette Pipeline?
-        if hasattr(loaded_obj, "predict") and hasattr(loaded_obj, "predict_proba"):
-            pipeline = loaded_obj
-        # B) dict, Pipeline darin?
-        elif isinstance(loaded_obj, dict):
-            cand = None
-            for k, v in loaded_obj.items():
-                if hasattr(v, "predict") and hasattr(v, "predict_proba"):
-                    cand = v
-                    break
-            if cand is None:
-                raise ValueError(
-                    "Geladenes joblib-Objekt ist ein dict, aber enthält keine Pipeline mit predict/predict_proba."
-                )
-            pipeline = cand
-        else:
-            raise ValueError(
-                "Unbekanntes Modellformat. Weder Pipeline noch dict mit Pipeline geladen."
-            )
-
-        self.pipeline = pipeline
-
-        # ----------------- Test-Subset bauen -----------------
-        if "subject" not in df_full.columns:
-            raise ValueError("Spalte 'subject' fehlt im DataFrame.")
-
-        if "video" not in df_full.columns:
-            raise ValueError("Spalte 'video' fehlt im DataFrame (wird für das Mapping benötigt).")
-
-        df_test = df_full[df_full["subject"].astype(int).isin(subjects_to_test)].copy()
-        if len(df_test) == 0:
-            self.logger.warning("No rows found for subjects %s", subjects_to_test)
-
-        # Label-Spalte bauen, falls nicht vorhanden
-        if "label" not in df_test.columns:
-            self.logger.info("Erzeuge 'label' via VIDEO_TO_LABEL Mapping")
-            df_test["label"] = df_test["video"].map(VIDEO_TO_LABEL)
-
-        before_len = len(df_test)
-        df_test = df_test[df_test["label"].notna()].copy()
-        self.logger.info(
-            "After video->label mapping & dropping unmapped: %d -> %d rows",
-            before_len, len(df_test)
-        )
-
-        # Optional: nur bestimmte Klassen wie im Experiment behalten
-        if self.classes_to_keep is not None:
-            before = len(df_test)
-            df_test = df_test[df_test["label"].isin(self.classes_to_keep)].copy()
-            self.logger.info(
-                "Filter auf Klassen %s: %d -> %d Zeilen",
-                self.classes_to_keep, before, len(df_test)
-            )
-
-        self.df_test = df_test
-
-        # ---------------------------------------------------------
-        # Feature-Liste aus dem Training laden
-        # ---------------------------------------------------------
-        feat_path = self.model_path.parent / "used_features.json"
-        if not feat_path.exists():
-            raise FileNotFoundError(f"Training-Featureliste fehlt: {feat_path}")
-
-        with open(feat_path, "r", encoding="utf-8") as f:
-            train_feat_cols = json.load(f)
-
-        self.feat_cols = train_feat_cols
-
-        # Fehlende Spalten im Test-DF auffüllen (falls vorhanden)
-        for col in train_feat_cols:
-            if col not in self.df_test.columns:
-                self.logger.warning(f"Spalte '{col}' fehlt im Test-Set – fülle mit 0.")
-                self.df_test[col] = 0.0
-
-        # Feature-Matrix in derselben Reihenfolge wie im Training
-        self.X_test = self.df_test[self.feat_cols].to_numpy(dtype=float)
-        self.y_test = self.df_test["label"].to_numpy()
-
-        self.logger.info("Using %d feature columns for eval.", len(self.feat_cols))
-
-        self.X_test = self.df_test[self.feat_cols].to_numpy(dtype=float)
-        self.y_test = self.df_test["label"].to_numpy()
-
-        # ----------------- Klassenreihenfolge -----------------
-        rf_step = None
-        if hasattr(self.pipeline, "named_steps") and "rf" in self.pipeline.named_steps:
-            rf_step = self.pipeline.named_steps["rf"]
-        else:
-            if hasattr(self.pipeline, "classes_"):
-                rf_step = self.pipeline
-
-        if rf_step is None:
-            raise ValueError("Konnte den RandomForestClassifier im Modell nicht finden ('rf').")
-
-        self.model_classes_ = rf_step.classes_
-        self.logger.info("Model classes_: %s", self.model_classes_.tolist())
-
-        # Debug-Info rausschreiben
-        with open(self.out_dir / "used_features_eval.json", "w", encoding="utf-8") as f:
-            json.dump(self.feat_cols, f, indent=2)
-
-    # ----------------- Fenster-Level Eval -----------------
-    def evaluate_window_level(self) -> Dict[str, Any]:
-        self.logger.info("[WindowEval] Predicting window-level labels ...")
-        y_pred = self.pipeline.predict(self.X_test)
-
-        acc = accuracy_score(self.y_test, y_pred)
-        bacc = balanced_accuracy_score(self.y_test, y_pred)
-        f1m = f1_score(self.y_test, y_pred, average='macro')
-
-        rep_txt = classification_report(self.y_test, y_pred, digits=3, output_dict=False)
-
-        labels_sorted = sorted(np.unique(np.concatenate([self.y_test, y_pred])))
-        cm = confusion_matrix(self.y_test, y_pred, labels=labels_sorted)
-
-        # Confusion Matrix speichern
-        pd.DataFrame(cm, index=labels_sorted, columns=labels_sorted).to_csv(
-            self.out_dir / "cm_window_level.csv", index=True
-        )
-        with open(self.out_dir / "report_window_level.txt", "w", encoding="utf-8") as f:
-            f.write(rep_txt)
-
-        out = {
-            "accuracy": float(acc),
-            "balanced_accuracy": float(bacc),
-            "f1_macro": float(f1m),
-            "labels_sorted": [str(x) for x in labels_sorted],
-            "confusion_matrix": cm.astype(int).tolist(),
-        }
-        with open(self.out_dir / "metrics_window_level.json", "w", encoding="utf-8") as f:
-            json.dump(out, f, indent=2)
-
-        self.logger.info(
-            "[WindowEval] acc=%.4f | bAcc=%.4f | f1_macro=%.4f",
-            acc, bacc, f1m
-        )
-        return out
-
-    # ----------------- Video-Level Eval -----------------
-    def evaluate_video_level_probs(self) -> Dict[str, Any]:
-        """
-        Für jedes (subject, video):
-        - nimm alle Fenster,
-        - sum(mehrere Fenster pro Klasse von predict_proba),
-        - normalisiere diese Summe,
-        - argmax => Video-Prediction,
-        - ground truth = Mehrheitslabel der Fenster.
-        """
-        if 'video' not in self.df_test.columns:
-            raise ValueError("Need 'video' column for video-level evaluation.")
-
-        self.logger.info("[VideoEval] Predicting probabilities ...")
-        proba_all = self.pipeline.predict_proba(self.X_test)  # shape: [N_windows, n_classes]
-        classes_model = self.model_classes_
-        prob_cols = [f"prob_{c}" for c in classes_model]
-
-        df_prob = self.df_test.reset_index(drop=True).copy()
-        df_prob[prob_cols] = proba_all
-
-        per_video_rows = []
-        for (subj, vid), g in df_prob.groupby(["subject", "video"]):
-            true_lab = _majority_label(g["label"])
-
-            # Wahrscheinlichkeitssummen über alle Fenster
-            sums = g[prob_cols].sum(axis=0).to_numpy(dtype=float)
-            total = float(sums.sum())
-            if total > 0.0:
-                norm = sums / total
-            else:
-                norm = np.full_like(sums, fill_value=1.0 / len(sums), dtype=float)
-
-            pred_idx = int(np.argmax(norm))
-            pred_lab = str(classes_model[pred_idx])
-
-            per_video_rows.append({
-                "subject": int(subj),
-                "video": int(vid),
-                "true_label": str(true_lab),
-                "pred_label": pred_lab,
-                "n_windows": int(len(g)),
-                "prob_accum_normalized": {
-                    str(classes_model[i]): float(norm[i]) for i in range(len(classes_model))
-                },
-            })
-
-        df_video = pd.DataFrame(per_video_rows)
-        df_video.to_csv(self.out_dir / "video_level_predictions.csv", index=False)
-
-        if len(df_video) > 0:
-            y_true_vid = df_video["true_label"].to_numpy()
-            y_pred_vid = df_video["pred_label"].to_numpy()
-
-            acc_vid = accuracy_score(y_true_vid, y_pred_vid)
-            bacc_vid = balanced_accuracy_score(y_true_vid, y_pred_vid)
-            f1m_vid = f1_score(y_true_vid, y_pred_vid, average="macro")
-
-            rep_vid_txt = classification_report(y_true_vid, y_pred_vid, digits=3, output_dict=False)
-
-            labels_sorted_vid = sorted(np.unique(np.concatenate([y_true_vid, y_pred_vid])))
-            cm_vid = confusion_matrix(y_true_vid, y_pred_vid, labels=labels_sorted_vid)
-
-            pd.DataFrame(cm_vid, index=labels_sorted_vid, columns=labels_sorted_vid).to_csv(
-                self.out_dir / "cm_video_level.csv", index=True
-            )
-            with open(self.out_dir / "report_video_level.txt", "w", encoding="utf-8") as f:
-                f.write(rep_vid_txt)
-
-            summary_vid = {
-                "accuracy": float(acc_vid),
-                "balanced_accuracy": float(bacc_vid),
-                "f1_macro": float(f1m_vid),
-                "labels_sorted": [str(x) for x in labels_sorted_vid],
-                "confusion_matrix": cm_vid.astype(int).tolist(),
-                "per_video": per_video_rows,
-            }
-        else:
-            self.logger.warning("[VideoEval] No videos found for these subjects.")
-            summary_vid = {
-                "accuracy": None,
-                "balanced_accuracy": None,
-                "f1_macro": None,
-                "labels_sorted": [],
-                "confusion_matrix": [],
-                "per_video": [],
-            }
-
-        with open(self.out_dir / "metrics_video_level.json", "w", encoding="utf-8") as f:
-            json.dump(summary_vid, f, indent=2)
-
-        self.logger.info(
-            "[VideoEval] video_acc=%.4f | video_bAcc=%.4f | video_f1_macro=%.4f",
-            summary_vid["accuracy"] if summary_vid["accuracy"] is not None else -1,
-            summary_vid["balanced_accuracy"] if summary_vid["balanced_accuracy"] is not None else -1,
-            summary_vid["f1_macro"] if summary_vid["f1_macro"] is not None else -1
-        )
-        return summary_vid
-
-
-# ---------------------------------------------------------
-# Helper: Table Loader (csv / gz / parquet)
-# ---------------------------------------------------------
-
-def load_any_table(path: Path) -> pd.DataFrame:
-    path = Path(path)
-    suffix = path.suffix.lower()
-
-    # .parquet lesen
-    if suffix == ".parquet":
-        return pd.read_parquet(path)
-
-    # .csv oder .gz -> csv
-    if suffix in [".csv", ".gz"]:
-        return pd.read_csv(path)
-
-    # Fallback: versuch csv
-    return pd.read_csv(path, encoding="utf-8", errors="replace")
-
-
-# ---------------------------------------------------------
-# main: alle Modelle durchiterieren
-# ---------------------------------------------------------
-
-if __name__ == "__main__":
-    logger = make_logger()
-
-    # >>> HIER ggf. anpassen <<<
-
-    # Pfad zu deinem combined-File wie im Training
-    base_csv = Path("features_case_60w15s_test/combined.csv.gz")
-
-    # Root, wo die trainierten Modelle liegen (wie in train_rf_from_case_combined.py)
-    model_root = Path("outputs_60w15s")
-
-    # Root, wo die Eval-Ergebnisse hinsollen
-    eval_root = Path("eval_60w15s")
-
-    # Welche Subjects sollen evaluiert werden?
-    SUBJECTS_TO_TEST = [29,  30]  # <- hier deine Test-Subjects eintragen
-
-    # Alle Experimente / Modelle wie im Training
-    experiments = [
-        ("scary_vs_amused",  ["scary", "amused"]),
-        ("bored_vs_relaxed", ["bored", "relaxed"]),
-        ("scary_vs_bored",   ["scary", "bored"]),
-        ("amused_vs_bored",  ["amused", "bored"]),
-        ("all_emotion", ["amused", "bored", "relaxed", "scary"]),
-    ]
-
-    # Daten einmal laden
-    logger.info("Lade Feature-Tabelle aus %s ...", base_csv)
-    df_full = load_any_table(base_csv)
-    logger.info("Gelesen: %d Zeilen, %d Spalten", len(df_full), df_full.shape[1])
-
-    # Optional: wenn in combined noch keine Pausen gefiltert sind, schmeiß sie raus
-    if "video" in df_full.columns:
-        before_pause = len(df_full)
-        df_full = df_full[~df_full["video"].isin([10, 11, 12])].copy()
-        logger.info("Pausen (10/11/12) entfernt: %d -> %d Zeilen", before_pause, len(df_full))
-
-    results_summary = []
-
-    for exp_name, classes in experiments:
-        logger.info("\n=== Starte Evaluation für Experiment: %s (%s) ===", exp_name, classes)
-
-        model_path = model_root / exp_name / "final_model_pipeline.joblib"
-        out_dir = eval_root / exp_name
-
-        if not model_path.exists():
-            logger.error("Modell für Experiment %s nicht gefunden unter %s – überspringe.",
-                         exp_name, model_path)
+    for subject_id in subjects:
+        print(f"\n=== Subject {subject_id} ===")
+        df_subj = df[df["subject"] == subject_id].copy()
+        if df_subj.empty:
+            print("Keine Fenster für dieses Subject, überspringe.")
             continue
 
-        evaluator = VideoLabelEvaluatorCase(
-            model_path=model_path,
-            df_full=df_full,
-            subjects_to_test=SUBJECTS_TO_TEST,
-            out_dir=out_dir,
-            classes_to_keep=classes,
-            logger=logger,
+        # chronologisch sortieren
+        df_subj = df_subj.sort_values("end_s").reset_index(drop=True)
+
+        # Arrays bauen
+        vids = df_subj["video"].to_numpy(dtype=int)
+        t_start = df_subj["start_s"].to_numpy(float)
+        t_end = df_subj["end_s"].to_numpy(float)
+        y_true_str = df_subj["true_label"].to_numpy(str)
+        y_pred_str = df_subj["pred_label"].to_numpy(str)
+
+        # 0/1 Encoding (neg=0, pos=1)
+        ys = (y_true_str == cfg.exp_pos).astype(int)
+        preds = (y_pred_str == cfg.exp_pos).astype(int)
+
+        # --- Video-Infos (Start, Ende, Dauer) ---
+        video_info: Dict[int, Tuple[float, float, float]] = {}
+        for v in np.unique(vids):
+            d_vid = df_subj[df_subj["video"] == v]
+            v_start = float(d_vid["start_s"].min())
+            v_end = float(d_vid["end_s"].max())
+            v_dur = v_end - v_start
+            if v_dur <= 0:
+                # Sicherheit: falls numerische Probleme
+                v_dur = max(1e-6, v_dur)
+            video_info[v] = (v_start, v_end, v_dur)
+
+        # Videos in der Reihenfolge ihres Beginns
+        videos_in_order = sorted(video_info.keys(),
+                                 key=lambda v: video_info[v][0])
+
+        # Kumulative Offsets über alle Videos
+        offset_s: Dict[int, float] = {}
+        video_segments_cum: List[Tuple[int, float, float]] = []  # (vid, start_s, end_s)
+        cum = 0.0
+        for v in videos_in_order:
+            v_start, v_end, v_dur = video_info[v]
+            offset_s[v] = cum
+            video_segments_cum.append((v, cum, cum + v_dur))
+            cum += v_dur
+
+        # Zeitachse für jedes Fenster: Ende des Fensters relativ zur Videolänge
+        x_time_s = np.zeros_like(t_end, dtype=float)
+        for i in range(len(t_end)):
+            v = vids[i]
+            v_start, _, _ = video_info[v]
+            rel = t_end[i] - v_start
+            x_time_s[i] = offset_s[v] + rel
+
+        # --- Aggregierte "Probabilities" (auf Basis der Vorhersage-Klasse) ---
+        agg_p_neg = np.zeros(len(ys), dtype=float)
+        agg_p_pos = np.zeros(len(ys), dtype=float)
+
+        count_total: Dict[int, int] = {}
+        count_neg: Dict[int, int] = {}
+        count_pos: Dict[int, int] = {}
+
+        for i, v in enumerate(vids):
+            if v not in count_total:
+                count_total[v] = 0
+                count_neg[v] = 0
+                count_pos[v] = 0
+
+            count_total[v] += 1
+            if preds[i] == 1:
+                count_pos[v] += 1
+            else:
+                count_neg[v] += 1
+
+            agg_p_neg[i] = count_neg[v] / count_total[v]
+            agg_p_pos[i] = count_pos[v] / count_total[v]
+
+        # --- Plot bauen ---
+        fig_path = cfg.out_dir / f"subject{subject_id}_rf_{cfg.exp_pos}_vs_{cfg.exp_neg}.png"
+        plot_single_subject(
+            subject_id=subject_id,
+            exp_pos=cfg.exp_pos,
+            exp_neg=cfg.exp_neg,
+            vids=vids,
+            x_time_s=x_time_s,
+            ys=ys,
+            preds=preds,
+            video_segments_cum=video_segments_cum,
+            agg_p_neg=agg_p_neg,
+            agg_p_pos=agg_p_pos,
+            fig_path=fig_path,
         )
+        print(f"Gespeichert: {fig_path}")
 
-        win_metrics = evaluator.evaluate_window_level()
-        vid_metrics = evaluator.evaluate_video_level_probs()
 
-        # Kleine Übersicht in einer Liste sammeln
-        results_summary.append({
-            "experiment": exp_name,
-            "classes": classes,
-            "window_acc": win_metrics["accuracy"],
-            "window_bacc": win_metrics["balanced_accuracy"],
-            "window_f1_macro": win_metrics["f1_macro"],
-            "video_acc": vid_metrics["accuracy"],
-            "video_bacc": vid_metrics["balanced_accuracy"],
-            "video_f1_macro": vid_metrics["f1_macro"],
-        })
+# ----------------------------------------------------------
+# Einzelnen Subject-Plot zeichnen (wie beim CNN-Plot)
+# ----------------------------------------------------------
 
-        logger.info("Experiment %s fertig.", exp_name)
+def plot_single_subject(subject_id: int,
+                        exp_pos: str,
+                        exp_neg: str,
+                        vids: np.ndarray,
+                        x_time_s: np.ndarray,
+                        ys: np.ndarray,
+                        preds: np.ndarray,
+                        video_segments_cum: List[Tuple[int, float, float]],
+                        agg_p_neg: np.ndarray,
+                        agg_p_pos: np.ndarray,
+                        fig_path: Path) -> None:
+    import numpy as np
+    import matplotlib.pyplot as plt
 
-    # Gesamtübersicht als CSV
-    if results_summary:
-        eval_root.mkdir(parents=True, exist_ok=True)
-        summary_df = pd.DataFrame(results_summary)
-        summary_df.to_csv(eval_root / "summary_all_experiments.csv", index=False)
-        logger.info("Gesamtübersicht gespeichert nach %s",
-                    eval_root / "summary_all_experiments.csv")
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1,
+        sharex=True,
+        figsize=(14, 7),
+        gridspec_kw={"height_ratios": [2, 2]},
+    )
 
-    logger.info("Alle Evaluationen abgeschlossen.")
+    # TOP PANEL: True vs Pred
+    ax1.scatter(x_time_s, ys, marker="o", label="True", alpha=0.7)
+    ax1.scatter(x_time_s, preds, marker="x", label="Pred", alpha=0.7)
+    ax1.set_yticks([0, 1])
+    ax1.set_yticklabels([exp_neg, exp_pos])
+    ax1.set_ylabel("Class")
+    ax1.set_title(f"Subject {subject_id} – {exp_pos} vs. {exp_neg} (RF, OOF)")
+
+    for vid, s, e in video_segments_cum:
+        ax1.axvline(e, linestyle="--", alpha=0.3)
+        mid = (s + e) / 2
+        ax1.text(mid, 1.15, f"Video {vid}", ha="center", va="bottom")
+
+    ax1.legend(loc="upper left", bbox_to_anchor=(1.02, 1))
+
+    # BOTTOM PANEL: aggregierte "Probabilities"
+    ax2.set_ylim(-0.05, 1.05)
+    ax2.set_ylabel("Aggregated probability")
+    ax2.set_xlabel("Time (s)")
+
+    vids_arr = np.array(vids)
+    first = True
+    for vid, start_s, end_s in video_segments_cum:
+        m = (vids_arr == vid)
+        if not np.any(m):
+            continue
+
+        xs = np.concatenate([[start_s], x_time_s[m]])
+        pb = np.concatenate([[0.5], agg_p_neg[m]])
+        ps = np.concatenate([[0.5], agg_p_pos[m]])
+
+        ax2.plot(xs, pb, marker=".", color="tab:blue",
+                 label="P(boring)" if first else None)
+        ax2.plot(xs, ps, marker=".", color="tab:orange",
+                 label="P(scary)" if first else None)
+        first = False
+
+    for _, _, e in video_segments_cum:
+        ax2.axvline(e, linestyle="--", alpha=0.3)
+
+    ax2.legend(loc="upper left", bbox_to_anchor=(1.02, 1))
+
+    fig.tight_layout(rect=[0, 0, 0.8, 1])
+    fig_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(fig_path, dpi=150)
+    plt.close()
+
+
+# ----------------------------------------------------------
+# Main
+# ----------------------------------------------------------
+
+def main():
+    cfg = PlotCfg(
+        cv_pred_path=Path("outputs_60w30s_plain/scary_vs_bored/cv_predictions.csv"),
+        out_dir=Path("figs_rf_scary_vs_bored_20w10s"),
+        exp_pos="scary",
+        exp_neg="bored",
+    )
+
+    # Beispiel-Subjects (anpassen wie du willst)
+    subjects = [11,18,19,20,22,24]
+    plot_subjects(cfg, subjects)
+
+
+if __name__ == "__main__":
+    main()

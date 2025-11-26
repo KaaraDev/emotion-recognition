@@ -1,0 +1,86 @@
+2025-11-15 12:38:03 | INFO    | Logger ready.
+2025-11-15 12:38:03 | INFO    | Lade Feature-CSV aus outputs\features_case_bvp_gsr_skt.csv ...
+2025-11-15 12:38:03 | INFO    | Gelesen: 13692 Zeilen, 23 Spalten
+2025-11-15 12:38:03 | INFO    | Pausen (10/11/12) entfernt: 13692 -> 7112
+2025-11-15 12:38:03 | INFO    | Video->Label Mapping angewendet. Unmapped gedroppt: 7112 -> 7112
+2025-11-15 12:38:03 | INFO    | Filter auf Klassen ['scary', 'amused']: 7112 -> 3916 Zeilen
+2025-11-15 12:38:03 | INFO    | Verwende 17 Feature-Spalten.
+2025-11-15 12:38:05 | INFO    | Fold 1/5: acc=0.5888 | bAcc=0.5945 | f1_macro=0.5729
+2025-11-15 12:38:05 | INFO    | Fold 1 done in 2.1s
+2025-11-15 12:38:08 | INFO    | Fold 2/5: acc=0.5793 | bAcc=0.5824 | f1_macro=0.5741
+2025-11-15 12:38:08 | INFO    | Fold 2 done in 2.1s
+2025-11-15 12:38:10 | INFO    | Fold 3/5: acc=0.6857 | bAcc=0.6813 | f1_macro=0.6714
+2025-11-15 12:38:10 | INFO    | Fold 3 done in 2.1s
+2025-11-15 12:38:12 | INFO    | Fold 4/5: acc=0.5829 | bAcc=0.5850 | f1_macro=0.5791
+2025-11-15 12:38:12 | INFO    | Fold 4 done in 2.2s
+2025-11-15 12:38:14 | INFO    | Fold 5/5: acc=0.6432 | bAcc=0.6387 | f1_macro=0.6302
+2025-11-15 12:38:14 | INFO    | Fold 5 done in 2.1s
+2025-11-15 12:38:14 | INFO    | == Pooled results over all folds ==
+2025-11-15 12:38:14 | INFO    | acc=0.6147 | bAcc=0.6151 | f1_macro=0.6147
+2025-11-15 12:38:14 | INFO    | CV fertig in 10.7s
+2025-11-15 13:30:46 | INFO    | Logger ready.
+2025-11-15 13:30:46 | INFO    | Lade Feature-CSV aus outputs\features_case_bvp_gsr_skt.csv ...
+2025-11-15 13:30:46 | INFO    | Gelesen: 13692 Zeilen, 23 Spalten
+2025-11-15 13:30:46 | INFO    | Pausen (10/11/12) entfernt: 13692 -> 7112
+2025-11-15 13:30:46 | INFO    | Video->Label Mapping angewendet. Unmapped gedroppt: 7112 -> 7112
+2025-11-15 13:30:46 | INFO    | Filter auf Klassen ['scary', 'amused']: 7112 -> 3916 Zeilen
+2025-11-15 13:30:46 | INFO    | Verwende 17 Feature-Spalten.
+2025-11-15 13:30:48 | INFO    | Fold 1/5: acc=0.5888 | bAcc=0.5945 | f1_macro=0.5729
+2025-11-15 13:30:48 | INFO    | Fold 1 done in 2.0s
+2025-11-15 13:30:50 | INFO    | Fold 2/5: acc=0.5793 | bAcc=0.5824 | f1_macro=0.5741
+2025-11-15 13:30:50 | INFO    | Fold 2 done in 2.0s
+2025-11-15 13:30:52 | INFO    | Fold 3/5: acc=0.6857 | bAcc=0.6813 | f1_macro=0.6714
+2025-11-15 13:30:52 | INFO    | Fold 3 done in 2.1s
+2025-11-15 13:30:54 | INFO    | Fold 4/5: acc=0.5829 | bAcc=0.5850 | f1_macro=0.5791
+2025-11-15 13:30:54 | INFO    | Fold 4 done in 2.1s
+2025-11-15 13:30:56 | INFO    | Fold 5/5: acc=0.6432 | bAcc=0.6387 | f1_macro=0.6302
+2025-11-15 13:30:56 | INFO    | Fold 5 done in 2.0s
+2025-11-15 13:30:56 | INFO    | == Pooled results over all folds ==
+2025-11-15 13:30:56 | INFO    | acc=0.6147 | bAcc=0.6151 | f1_macro=0.6147
+2025-11-15 13:30:56 | INFO    | CV fertig in 10.3s
+2025-11-15 13:31:38 | INFO    | Logger ready.
+2025-11-15 13:31:38 | INFO    | Lade Feature-CSV aus outputs\features_case_bvp_gsr_skt.csv ...
+2025-11-15 13:31:38 | INFO    | Gelesen: 13692 Zeilen, 23 Spalten
+2025-11-15 13:31:38 | INFO    | Pausen (10/11/12) entfernt: 13692 -> 7112
+2025-11-15 13:31:38 | INFO    | Video->Label Mapping angewendet. Unmapped gedroppt: 7112 -> 7112
+2025-11-15 13:31:38 | INFO    | Filter auf Klassen ['scary', 'amused']: 7112 -> 3916 Zeilen
+2025-11-15 13:31:38 | INFO    | Verwende 17 Feature-Spalten.
+2025-11-15 13:31:40 | INFO    | Fold 1/5: acc=0.5888 | bAcc=0.5945 | f1_macro=0.5729
+2025-11-15 13:31:40 | INFO    | Fold 1 done in 2.1s
+2025-11-15 13:31:42 | INFO    | Fold 2/5: acc=0.5793 | bAcc=0.5824 | f1_macro=0.5741
+2025-11-15 13:31:42 | INFO    | Fold 2 done in 2.0s
+2025-11-15 13:31:45 | INFO    | Fold 3/5: acc=0.6857 | bAcc=0.6813 | f1_macro=0.6714
+2025-11-15 13:31:45 | INFO    | Fold 3 done in 2.2s
+2025-11-15 13:31:47 | INFO    | Fold 4/5: acc=0.5829 | bAcc=0.5850 | f1_macro=0.5791
+2025-11-15 13:31:47 | INFO    | Fold 4 done in 2.1s
+2025-11-15 13:31:49 | INFO    | Fold 5/5: acc=0.6432 | bAcc=0.6387 | f1_macro=0.6302
+2025-11-15 13:31:49 | INFO    | Fold 5 done in 2.1s
+2025-11-15 13:31:49 | INFO    | == Pooled results over all folds ==
+2025-11-15 13:31:49 | INFO    | acc=0.6147 | bAcc=0.6151 | f1_macro=0.6147
+2025-11-15 13:31:49 | INFO    | CV fertig in 10.5s
+2025-11-15 13:31:51 | WARNING | Längen-Mismatch bei Feature Importances: len(feat_cols)=17, len(importances)=13. Schneide auf das Minimum zu.
+2025-11-15 13:31:51 | INFO    | Finales Modell gespeichert nach rf_outputs\scary_vs_amused\final_model_pipeline.joblib
+2025-11-15 13:31:51 | INFO    | Experiment scary_vs_amused fertig.
+2025-11-15 15:50:55 | INFO    | Logger ready.
+2025-11-15 15:50:55 | INFO    | Lade Feature-CSV aus outputs\features_case_bvp_gsr_skt.csv ...
+2025-11-15 15:50:55 | INFO    | Gelesen: 13692 Zeilen, 23 Spalten
+2025-11-15 15:50:55 | INFO    | Pausen (10/11/12) entfernt: 13692 -> 7112
+2025-11-15 15:50:55 | INFO    | Video->Label Mapping angewendet. Unmapped gedroppt: 7112 -> 7112
+2025-11-15 15:50:55 | INFO    | Filter auf Klassen ['scary', 'amused']: 7112 -> 3916 Zeilen
+2025-11-15 15:50:55 | INFO    | Verwende 17 Feature-Spalten.
+2025-11-15 15:50:57 | INFO    | Fold 1/5: acc=0.5888 | bAcc=0.5945 | f1_macro=0.5729
+2025-11-15 15:50:57 | INFO    | Fold 1 done in 2.2s
+2025-11-15 15:50:59 | INFO    | Fold 2/5: acc=0.5793 | bAcc=0.5824 | f1_macro=0.5741
+2025-11-15 15:50:59 | INFO    | Fold 2 done in 2.2s
+2025-11-15 15:51:01 | INFO    | Fold 3/5: acc=0.6857 | bAcc=0.6813 | f1_macro=0.6714
+2025-11-15 15:51:01 | INFO    | Fold 3 done in 2.3s
+2025-11-15 15:51:04 | INFO    | Fold 4/5: acc=0.5829 | bAcc=0.5850 | f1_macro=0.5791
+2025-11-15 15:51:04 | INFO    | Fold 4 done in 2.3s
+2025-11-15 15:51:06 | INFO    | Fold 5/5: acc=0.6432 | bAcc=0.6387 | f1_macro=0.6302
+2025-11-15 15:51:06 | INFO    | Fold 5 done in 2.2s
+2025-11-15 15:51:06 | INFO    | == Pooled results over all folds ==
+2025-11-15 15:51:06 | INFO    | acc=0.6147 | bAcc=0.6151 | f1_macro=0.6147
+2025-11-15 15:51:06 | INFO    | CV fertig in 11.3s
+2025-11-15 15:51:08 | WARNING | Längen-Mismatch bei Feature Importances: len(feat_cols)=17, len(importances)=13. Schneide auf das Minimum zu.
+2025-11-15 15:51:09 | INFO    | Finales Modell gespeichert nach rf_outputs\scary_vs_amused\final_model_pipeline.joblib
+2025-11-15 15:51:09 | INFO    | Experiment scary_vs_amused fertig.

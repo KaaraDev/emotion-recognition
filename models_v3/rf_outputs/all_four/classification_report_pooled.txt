@@ -1,0 +1,10 @@
+              precision    recall  f1-score   support
+
+      amused      0.395     0.373     0.384      2006
+       bored      0.336     0.341     0.339      1558
+     relaxed      0.306     0.254     0.278      1638
+       scary      0.442     0.526     0.480      1910
+
+    accuracy                          0.380      7112
+   macro avg      0.370     0.374     0.370      7112
+weighted avg      0.374     0.380     0.375      7112

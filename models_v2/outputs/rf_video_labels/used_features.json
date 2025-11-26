@@ -1,0 +1,19 @@
+[
+  "bvp_bpm",
+  "bvp_ibi",
+  "bvp_sdnn",
+  "bvp_sdsd",
+  "bvp_rmssd",
+  "bvp_pnn20",
+  "bvp_pnn50",
+  "bvp_mad",
+  "bvp_sd1",
+  "bvp_sd2",
+  "bvp_s",
+  "bvp_sd1sd2",
+  "bvp_breathingrate",
+  "gsr_mean",
+  "gsr_slope",
+  "skt_mean",
+  "skt_slope"
+]

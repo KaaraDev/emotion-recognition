@@ -20,14 +20,14 @@ class CaseDataPreprocessor:
     def __init__(
             self,
             base_path: str | Path,
-            window_size: int = 5,
-            step_size: int = 1,
+            window_size: int = 20,
+            step_size: int = 10,
             subjects: Optional[List[int]] = None,
             label_shift_s: float = 0.0,
             use_video_as_feature: bool = False,
             normalize_video_lengths: bool = False,
             target_video_len_s: Optional[float] = None,
-            use_raw: bool = True,   # <--- NEU: standardmäßig raw benutzen
+            use_raw: bool = True,  # <--- NEU: standardmäßig raw benutzen
     ):
         self.base_path = Path(base_path)
         self.window_size = int(window_size)
@@ -43,7 +43,6 @@ class CaseDataPreprocessor:
             "ecg", "bvp", "gsr", "rsp", "skt",
             "emg_zygo", "emg_coru", "emg_trap"
         ]
-
 
     # ---------- Hilfsfunktionen ----------
 
@@ -252,38 +251,64 @@ class CaseDataPreprocessor:
 
     def build_windows(self, df: pd.DataFrame) -> List[Tuple[int, int]]:
         """
-        NEU:
-        Wir bauen Fenster über Zeit, nicht über Samples.
-        D.h. wir holen uns Startzeiten, dann nehmen wir alle Zeilen,
-        deren time_s in [start, start+window_size).
-        Wir geben trotzdem Indexbereiche zurück, damit downstream gleich bleibt.
+        Baut Zeitfenster pro Video, ohne Video-Grenzen zu überschreiten.
+
+        - Für jedes zusammenhängende Segment gleicher 'video'-ID werden
+          Fenster mit Länge window_size und Schritt step_size gebaut.
+        - Fenster dürfen NICHT über Video-Grenzen gehen.
+        - Wenn am Ende eines Videos nicht genug Sekunden für ein komplettes
+          Fenster übrig sind, wird der Rest verworfen.
         """
+        if "time_s" not in df.columns:
+            raise ValueError("Spalte 'time_s' fehlt im DataFrame.")
+        if "video" not in df.columns:
+            raise ValueError("Spalte 'video' fehlt im DataFrame – nötig für videoweise Fenster.")
+
         times = df["time_s"].to_numpy(dtype=float)
+        videos = df["video"].to_numpy()
         if len(times) == 0:
             return []
 
         idx_pairs: List[Tuple[int, int]] = []
 
-        t_start_global = times[0]
-        t_end_global = times[-1]
+        # zusammenhängende Blöcke gleicher Video-ID finden
+        change = np.r_[True, videos[1:] != videos[:-1]]
+        block_starts = np.flatnonzero(change)
+        block_ends = np.r_[block_starts[1:], len(videos)]
 
-        cur_start_t = t_start_global
         w = float(self.window_size)
         step = float(self.step_size)
 
-        while cur_start_t + w <= t_end_global + 1e-9:
-            # Start/End-Bereich in Zeit
-            t_lo = cur_start_t
-            t_hi = cur_start_t + w
+        for b_start, b_end in zip(block_starts, block_ends):
+            vid = videos[b_start]
 
-            # alle Indizes in diesem Zeitbereich
-            in_window = np.where((times >= t_lo) & (times < t_hi))[0]
-            if len(in_window) > 1:
-                s_idx = in_window[0]
-                e_idx = in_window[-1] + 1  # slice-exclusive
-                idx_pairs.append((s_idx, e_idx))
+            # Optional: Pausen überspringen (z.B. 10/11/12), falls gewünscht
+            # if vid in (10, 11, 12):
+            #     continue
 
-            cur_start_t += step
+            seg_times = times[b_start:b_end]
+            if len(seg_times) < 2:
+                continue
+
+            t_start_seg = seg_times[0]
+            t_end_seg = seg_times[-1]
+
+            cur_start_t = t_start_seg
+            while cur_start_t + w <= t_end_seg + 1e-9:
+                t_lo = cur_start_t
+                t_hi = cur_start_t + w
+
+                # Indizes nur innerhalb dieses Video-Segments
+                in_window_local = np.where(
+                    (seg_times >= t_lo) & (seg_times < t_hi)
+                )[0]
+
+                if len(in_window_local) > 1:
+                    s_idx = b_start + in_window_local[0]
+                    e_idx = b_start + in_window_local[-1] + 1  # slice-exclusive
+                    idx_pairs.append((s_idx, e_idx))
+
+                cur_start_t += step
 
         return idx_pairs
 
@@ -659,9 +684,9 @@ if __name__ == "__main__":
 
     prep = CaseDataPreprocessor(
         base_path=base_path,
-        window_size=60,
-        step_size=30,
-        subjects=list(range(1, 30)),
+        window_size=20,
+        step_size=10,
+        subjects=list(range(1, 31)),
         label_shift_s=0.0,
         use_video_as_feature=False,
         normalize_video_lengths=False,
@@ -672,7 +697,7 @@ if __name__ == "__main__":
     X, yv, ya, meta = prep.prepare_all()
 
     # ---------------- Cleanup & Feature-Selektion ----------------
-    out_dir = Path("features_case_60w30s")
+    out_dir = Path("features_case_20w10s")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 1) Inf-Werte in NaN umwandeln

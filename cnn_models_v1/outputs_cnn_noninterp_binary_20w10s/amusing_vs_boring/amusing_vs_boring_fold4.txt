@@ -1,0 +1,36 @@
+Experiment: amusing_vs_boring
+Fold: 4
+
+Positive class (1): amusing
+Negative class (0): boring
+
+Config:
+  window_size_s = 20
+  step_size_s   = 10
+  target_fs     = 1000
+  min_samples_in_window = 5
+  batch_size    = 64
+  num_epochs    = 60
+  lr            = 0.0005
+  weight_decay  = 1e-05
+  early_stopping_patience = 7
+  n_splits      = 5
+
+Best validation accuracy: 0.6925
+Final val_loss (best model re-eval): 1.0867
+Final val_acc  (best model re-eval): 0.6925
+
+Training samples:   1392
+Validation samples: 348
+
+Class counts (train):
+  Label 0 (boring): 600
+  Label 1 (amusing): 792
+
+Class counts (val):
+  Label 0 (boring): 150
+  Label 1 (amusing): 198
+
+Confusion matrix (rows=true, cols=pred) [0,1]:
+   105   45
+    62  136

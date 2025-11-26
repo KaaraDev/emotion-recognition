@@ -29,8 +29,8 @@ class TrainCfg:
     # Fenster / Sampling
     window_size_s: int = 60
     step_size_s: int = 30
-    target_fs: int = 100
-    min_samples_in_window: int = 50
+    target_fs: int = 1000
+    min_samples_in_window: int = 5
 
     # Training
     batch_size: int = 64
@@ -71,9 +71,14 @@ def load_subject_phys_files(phys_dir: Path) -> Dict[int, pd.DataFrame]:
     """
     Lädt alle sub_*.csv der non-interpolated physiologischen Daten.
     Fügt eine Spalte 'subject_id' hinzu und gibt ein Dict {sid: df}.
+    Loggt, welche Dateien geladen werden und wie viele Zeilen/Spalten sie haben.
     """
+    print(f"[LOAD] Suche sub_*.csv in: {phys_dir}")
+
     if not any(phys_dir.glob("sub_*.csv")) and (phys_dir / "physiological").exists():
+        print(f"[LOAD] Keine sub_*.csv direkt gefunden, versuche Unterordner 'physiological'")
         phys_dir = phys_dir / "physiological"
+        print(f"[LOAD] Neuer Suchpfad: {phys_dir}")
 
     csv_files = list(phys_dir.glob("sub_*.csv"))
     if not csv_files:
@@ -91,7 +96,10 @@ def load_subject_phys_files(phys_dir: Path) -> Dict[int, pd.DataFrame]:
             digits = "".join(ch for ch in name if ch.isdigit())
             sid = int(digits)
 
+        print(f"[LOAD] Lese Datei {f.name} (subject_id={sid}) ...")
         df = pd.read_csv(f)
+
+        print(f"[LOAD]   -> Shape: {df.shape[0]} Zeilen, {df.shape[1]} Spalten")
 
         if "daqtime" not in df.columns:
             raise ValueError(f"Spalte 'daqtime' fehlt in {f.name}")
@@ -101,7 +109,7 @@ def load_subject_phys_files(phys_dir: Path) -> Dict[int, pd.DataFrame]:
         df["subject_id"] = sid
         subject_dfs[sid] = df
 
-    print(f"{len(subject_dfs)} Subjects geladen aus {phys_dir}")
+    print(f"[LOAD] Insgesamt {len(subject_dfs)} Subjects geladen aus {phys_dir}")
     return subject_dfs
 
 
@@ -122,10 +130,7 @@ def build_windows_from_noninterp(
       channel_cols : Kanäle (nach Ausschluss von daqtime, video, subject_id)
     zurück.
 
-    Verbesserungen:
-    - Z-Score Normalisierung pro Subject & Kanal
-    - Clipping von Ausreißern (±5 Std-Abw.)
-    - NaN-Prüfung pro Fenster / Kanal
+    Loggt zusätzlich, warum einzelne Fenster verworfen werden.
     """
 
     video_type_map = {
@@ -156,8 +161,13 @@ def build_windows_from_noninterp(
     step_ms = cfg.step_size_s * 1000
     target_len = cfg.window_size_s * cfg.target_fs
 
+    print(f"[WINDOW] Verwende Kanäle: {channel_cols}")
+    print(f"[WINDOW] window_size={cfg.window_size_s}s, step_size={cfg.step_size_s}s, "
+          f"target_fs={cfg.target_fs}Hz, min_samples_in_window={cfg.min_samples_in_window}")
+
     for sid, df in subject_dfs.items():
         df = df.sort_values("daqtime").reset_index(drop=True)
+        print(f"[WINDOW] Subject {sid}: {df.shape[0]} Zeilen, Videos: {sorted(df['video'].unique().tolist())}")
 
         # --- Normalisierung pro Subject & Kanal ---
         chan_stats: Dict[str, Tuple[float, float]] = {}
@@ -168,44 +178,62 @@ def build_windows_from_noninterp(
             if finite_mask.sum() == 0:
                 mean = 0.0
                 std = 1.0
+                print(f"[WARN] Subject {sid}, Kanal {col}: keine finite Werte, benutze mean=0,std=1")
             else:
                 mean = float(np.mean(vals[finite_mask]))
                 std = float(np.std(vals[finite_mask]))
                 if std < 1e-8:
                     std = 1.0
+                    print(f"[WARN] Subject {sid}, Kanal {col}: std ~0, setze std=1")
             chan_stats[col] = (mean, std)
 
         videos = df["video"].unique()
 
         for vid in videos:
             if vid not in video_type_map:
+                print(f"[VIDEO SKIP] Subject {sid}, video={vid}: nicht im video_type_map")
                 continue
 
             video_type = video_type_map[vid]
             if video_type in excluded_types:
+                print(f"[VIDEO SKIP] Subject {sid}, video={vid}, type={video_type}: excluded (blu/start/end)")
                 continue
 
             df_vid = df[df["video"] == vid]
             if df_vid.empty:
+                print(f"[VIDEO SKIP] Subject {sid}, video={vid}, type={video_type}: df_vid ist leer")
                 continue
 
             t_min = df_vid["daqtime"].min()
             t_max = df_vid["daqtime"].max()
-            if t_max - t_min < window_ms:
+            dur_ms = t_max - t_min
+            if dur_ms < window_ms:
+                print(f"[VIDEO SKIP] Subject {sid}, video={vid}, type={video_type}: "
+                      f"Dauer {dur_ms}ms < window_ms {window_ms}ms (zu kurz für ein Fenster)")
                 continue
 
             starts = np.arange(t_min, t_max - window_ms + 1, step_ms, dtype=np.int64)
+            print(f"[VIDEO] Subject {sid}, video={vid}, type={video_type}: "
+                  f"Dauer={dur_ms}ms, theoretische Fenster={len(starts)}")
 
-            for t_start in starts:
+            for win_idx, t_start in enumerate(starts):
                 t_end = t_start + window_ms
                 seg = df_vid[(df_vid["daqtime"] >= t_start) & (df_vid["daqtime"] < t_end)]
+                seg_len = len(seg)
 
-                if len(seg) < cfg.min_samples_in_window:
+                if seg_len < cfg.min_samples_in_window:
+                    print(f"[WINDOW SKIP] Subject {sid}, video={vid}, type={video_type}, "
+                          f"win_idx={win_idx}, t=[{t_start},{t_end})ms: "
+                          f"nur {seg_len} Samples (< {cfg.min_samples_in_window})")
                     continue
 
                 t_seg = seg["daqtime"].values.astype(np.float64)
-                if len(np.unique(t_seg)) < 2:
+                unique_t = np.unique(t_seg)
+                if len(unique_t) < 2:
                     # Für Interpolation brauchen wir mind. 2 unterschiedliche Zeitpunkte
+                    print(f"[WINDOW SKIP] Subject {sid}, video={vid}, type={video_type}, "
+                          f"win_idx={win_idx}, t=[{t_start},{t_end})ms: "
+                          f"nur {len(unique_t)} unterschiedliche daqtime-Werte (Interpolation nicht möglich)")
                     continue
 
                 t_uniform = np.linspace(
@@ -218,14 +246,19 @@ def build_windows_from_noninterp(
 
                 x_resampled = np.zeros((len(channel_cols), target_len), dtype=np.float32)
                 window_ok = True
+                window_problem_reason = None
 
                 for ci, col in enumerate(channel_cols):
                     vals = seg[col].values.astype(np.float64)
 
                     # NaNs pro Kanal entfernen
                     finite_mask = np.isfinite(vals) & np.isfinite(t_seg)
-                    if finite_mask.sum() < 2:
+                    finite_count = finite_mask.sum()
+                    if finite_count < 2:
                         window_ok = False
+                        window_problem_reason = (
+                            f"Kanal {col}: nur {finite_count} finite Werte im Fenster"
+                        )
                         break
 
                     vals = vals[finite_mask]
@@ -243,16 +276,25 @@ def build_windows_from_noninterp(
                             t_seg_chan,
                             vals
                         ).astype(np.float32)
-                    except Exception:
+                    except Exception as e:
                         window_ok = False
+                        window_problem_reason = (
+                            f"Interpolation-Fehler in Kanal {col}: {repr(e)}"
+                        )
                         break
 
                 if not window_ok:
+                    print(f"[WINDOW SKIP] Subject {sid}, video={vid}, type={video_type}, "
+                          f"win_idx={win_idx}, t=[{t_start},{t_end})ms: {window_problem_reason}")
                     continue
 
                 if np.isnan(x_resampled).any():
+                    print(f"[WINDOW SKIP] Subject {sid}, video={vid}, type={video_type}, "
+                          f"win_idx={win_idx}, t=[{t_start},{t_end})ms: "
+                          f"NaNs nach Interpolation gefunden")
                     continue
 
+                # Fenster wird akzeptiert
                 all_X.append(x_resampled)
                 all_y_str.append(video_type)
                 all_groups.append(sid)
@@ -265,6 +307,7 @@ def build_windows_from_noninterp(
     groups = np.array(all_groups, dtype=np.int64)
 
     print("Verfügbare Klassen (nach Filter):", sorted(set(y_str.tolist())))
+    print(f"[WINDOW] Insgesamt erzeugte Fenster: {X.shape[0]}")
     return X, y_str, groups, channel_cols
 
 
@@ -440,7 +483,7 @@ def run_binary_experiment(
         Xtr, ytr = X_exp[train_idx], y_bin[train_idx]
         Xva, yva = X_exp[val_idx], y_bin[val_idx]
 
-        # <<< NEU: welche Subjekte sind in Train/Val?
+        # <<< Subjekte in Train/Val loggen
         train_subjects = np.unique(groups_exp[train_idx])
         val_subjects = np.unique(groups_exp[val_idx])
 
@@ -590,74 +633,6 @@ def run_binary_experiment(
         else:
             print("  -> Kein bestes Modell für diesen Fold (evtl. alle Folds übersprungen).")
 
-    # Nach allen Folds: finales Modell auf ALLEN Daten trainieren
-    # (nur wenn überhaupt Samples vorhanden sind)
-    if X_exp.shape[0] > 0:
-        train_final_model_on_all_data(
-            exp_name=exp_name,
-            cls_pos=cls_pos,
-            cls_neg=cls_neg,
-            X_exp=X_exp,
-            y_bin=y_bin,
-            cfg=cfg,
-            in_channels=in_channels,
-        )
-
-
-def train_final_model_on_all_data(
-        exp_name: str,
-        cls_pos: str,
-        cls_neg: str,
-        X_exp: np.ndarray,
-        y_bin: np.ndarray,
-        cfg: TrainCfg,
-        in_channels: int,
-):
-    """
-    Trainiert ein finales Modell auf allen verfügbaren Fenstern für dieses Binary-Setup.
-    Nutzt dieselbe Architektur, Loss & Optimizer-Einstellungen wie in der CV.
-    Speichert das Modell als {exp_name}_final.pt.
-    """
-    device = cfg.device
-    n_classes = 2
-
-    out_dir_exp = cfg.out_dir / exp_name
-    out_dir_exp.mkdir(parents=True, exist_ok=True)
-
-    # DataLoader über alle Daten
-    full_loader = DataLoader(
-        WindowDataset(X_exp, y_bin),
-        batch_size=cfg.batch_size,
-        shuffle=True,
-        num_workers=cfg.num_workers,
-        pin_memory=True,
-    )
-
-    model = CNN1DVideoType(in_channels=in_channels, n_classes=n_classes).to(device)
-
-    # Class-Weights wie in CV
-    class_counts = np.bincount(y_bin, minlength=2)
-    class_weights = 1.0 / (class_counts + 1e-8)
-    class_weights = class_weights / class_weights.mean()
-    class_weights_t = torch.tensor(class_weights, dtype=torch.float32, device=device)
-
-    criterion = nn.CrossEntropyLoss(weight=class_weights_t)
-    optimizer = torch.optim.Adam(
-        model.parameters(),
-        lr=cfg.lr,
-        weight_decay=cfg.weight_decay,
-    )
-
-    print(f"\n  === Trainiere finales Modell auf ALLEN Daten: {exp_name} ({cls_pos} vs {cls_neg}) ===")
-    for epoch in range(1, cfg.num_epochs + 1):
-        tloss = train_one_epoch(model, full_loader, optimizer, device, criterion)
-        print(f"    [FINAL] Epoch {epoch:02d} | train_loss={tloss:.4f}")
-
-    # Komplettes Modell speichern
-    final_model_path = out_dir_exp / f"{exp_name}_final.pt"
-    torch.save(model.state_dict(), final_model_path)
-    print(f"  -> Finales Modell auf allen Daten gespeichert als {final_model_path}")
-
 
 # ----------------------------------------------------------
 # Main
@@ -668,7 +643,7 @@ def main():
         noninterp_phys_dir=Path(
             r"C:\Users\metin\OneDrive\Desktop\Informatik\10.Semester\thesis\emotion-recognition\case_dataset-master\data\non-interpolated\physiological"
         ),
-        out_dir=Path("outputs_cnn_noninterp_binary"),
+        out_dir=Path("outputs_cnn_noninterp_binary_60w30s"),
     )
 
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
