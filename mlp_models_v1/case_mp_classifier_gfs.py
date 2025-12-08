@@ -1,4 +1,5 @@
-# train_mlp_whitelist_hyperopt.py
+# train_rf_from_case_combined_plain_oof_preds_greedy.py
+
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,7 +13,7 @@ import random
 import numpy as np
 import pandas as pd
 
-from sklearn.model_selection import GroupKFold, RandomizedSearchCV
+from sklearn.model_selection import GroupKFold
 from sklearn.metrics import (
     accuracy_score, f1_score, balanced_accuracy_score,
     classification_report, confusion_matrix
@@ -20,26 +21,9 @@ from sklearn.metrics import (
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from sklearn.feature_selection import RFE
+from sklearn.ensemble import RandomForestClassifier
 import joblib
-
-# ------------------- Feature-Whitelist -------------------
-# Hier deine finalen Features eintragen (alle müssen Spaltennamen im CSV sein).
-FEATURE_WHITELIST: List[str] | None = [
-    "gsr_mean",
-    "gsr_std",
-    "gsr_min",
-    "gsr_max",
-    "gsr_slope_per_s",
-    "eda_SCR_Peaks_N",
-    "eda_SCR_Peaks_Amplitude_Mean",
-    "eda_EDA_Tonic_SD",
-    "eda_EDA_Autocorrelation",
-    "eda_tonic_mean",
-    "eda_phasic_mean",
-    "gsr_diff_mean",
-    "gsr_diff_std",
-    "gsr_pos_diff_ratio",
-]
 
 
 # ------------------- Konfiguration -------------------
@@ -60,9 +44,9 @@ class TrainCfg:
     bored_target: str = "median"  # "min" oder "median"
     classes_to_keep: List[str] | None = None
 
-    # Hyperparameter-Suche
-    use_hyperopt: bool = True
-    n_iter_search: int = 30  # Anzahl Zufalls-Kombinationen in RandomizedSearchCV
+    # "rfe" Flag & Zielanzahl Features -> hier nutzen wir jetzt Greedy-Forward-Selection
+    use_rfe: bool = True
+    rfe_n_features: int = 60  # maximale Anzahl Features (inkl. Whitelist)
 
 
 # Mapping wie in deinem alten Skript
@@ -79,12 +63,23 @@ VIDEO_TO_LABEL = {
 EXCLUDE_VIDEO_IDS = {10, 11, 12}
 EMOTIONS = ["amused", "bored", "relaxed", "scary"]
 
+# Diese Features sollen am Anfang verwendet werden und bilden das Start-Set
+WHITELIST_FEATURES = [
+    "gsr_slope_per_s",
+    "eda_SCR_Peaks_N",
+    "eda_SCR_Peaks_Amplitude_Mean",
+    "emg_trap_max",
+    "skt_slope_per_s",
+    "gsr_diff_mean",
+    "emg_trap_diff_std",
+]
+
 
 # ------------------- Logging -------------------
 
 def setup_logger(out_dir: Path, level: str = "INFO") -> logging.Logger:
     out_dir.mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger("mlp_case")
+    logger = logging.getLogger("rf_case")
     logger.setLevel(getattr(logging, level.upper(), logging.INFO))
     logger.handlers.clear()
 
@@ -172,42 +167,118 @@ def downsample_class(df: pd.DataFrame, cls: str, cfg: TrainCfg, logger: logging.
     return out
 
 
-# ------------------- MLP + Hyperparameter-Suche -------------------
+# ------------------- Builder für MLP + (ehem. RFE) -------------------
 
-def build_base_mlp(random_state: int) -> MLPClassifier:
-    """
-    Basis-MLP. Die Hyperparameter werden später von RandomizedSearchCV überschrieben.
-    """
+def build_mlp() -> MLPClassifier:
+    """MLPClassifier für die CASE-Features."""
     return MLPClassifier(
-        hidden_layer_sizes=(128, 64, 32),
+        hidden_layer_sizes=(128, 64, 32),  # tieferes Netz: mehr Kapazität
         activation="relu",
         solver="adam",
-        alpha=1e-3,
-        batch_size=64,
-        learning_rate_init=5e-4,
-        max_iter=4000,
-        random_state=random_state,
+        alpha=1e-3,        # stärkere L2-Regularisierung gegen Overfitting
+        batch_size=64,     # kleinere Batches -> stabilere Updates
+        learning_rate_init=5e-4,  # kleinere Lernrate für das größere Netz
+        max_iter=800,
+        random_state=42,
         verbose=False,
     )
 
 
-def get_hyperparam_distributions() -> Dict[str, Any]:
+def build_rfe_estimator(random_state: int) -> RandomForestClassifier:
     """
-    Suchraum für RandomizedSearchCV.
-    Alle Keys beziehen sich auf den Pipeline-Namen 'mlp__...'.
+    Basis-Estimator für RFE.
+    (Wird im aktuellen Greedy-Setup nicht mehr verwendet, kann aber bleiben.)
     """
-    return {
-        "mlp__hidden_layer_sizes": [
-            (64,),
-            (128,),
-            (64, 32),
-            (128, 64),
-            (128, 64, 32),
-        ],
-        "mlp__alpha": [1e-4, 3e-4, 1e-3, 3e-3, 1e-2],
-        "mlp__learning_rate_init": [1e-3, 5e-4, 1e-4],
-        "mlp__batch_size": [32, 64, 128],
-    }
+    return RandomForestClassifier(
+        n_estimators=200,
+        max_depth=None,
+        random_state=random_state,
+        n_jobs=-1,
+    )
+
+
+# ------------------- Greedy Forward Selection -------------------
+
+def greedy_forward_selection(
+    X_train_df: pd.DataFrame,
+    y_train: np.ndarray,
+    X_val_df: pd.DataFrame,
+    y_val: np.ndarray,
+    feat_cols: List[str],
+    cfg: TrainCfg,
+    logger: logging.Logger,
+    fold: int,
+) -> List[str]:
+    """
+    Starte mit WHITELIST_FEATURES (sofern vorhanden) und füge iterativ jeweils
+    ein Feature hinzu, das die Val-F1_macro am meisten verbessert.
+    Maximale Feature-Anzahl wird durch cfg.rfe_n_features begrenzt.
+    """
+
+    # Whitelist auf tatsächlich vorhandene Features beschränken
+    base_feats = [f for f in WHITELIST_FEATURES if f in feat_cols]
+    missing = [f for f in WHITELIST_FEATURES if f not in feat_cols]
+    if missing:
+        logger.warning("Fold %d: Whitelist-Features fehlen und werden ignoriert: %s", fold, missing)
+
+    # Obergrenze für die Feature-Anzahl
+    max_feats = min(cfg.rfe_n_features, len(feat_cols))
+    if max_feats <= 0:
+        logger.warning("Fold %d: max_feats <= 0, nehme alle Features.", fold)
+        return feat_cols
+
+    # Wenn die Whitelist schon >= max_feats ist -> einfach Whitelist abschneiden
+    if len(base_feats) >= max_feats:
+        logger.info(
+            "Fold %d: Whitelist hat bereits %d >= max_feats=%d Features. "
+            "Verwende nur Whitelist-Features.",
+            fold, len(base_feats), max_feats,
+        )
+        return base_feats[:max_feats]
+
+    current_feats = list(base_feats)
+    remaining_feats = [f for f in feat_cols if f not in current_feats]
+
+    logger.info(
+        "Fold %d: Starte Greedy-Forward-Selection mit %d Whitelist-Features, max %d Features.",
+        fold, len(current_feats), max_feats,
+    )
+
+    # Solange wir noch unter max_feats sind und noch Features übrig haben
+    while len(current_feats) < max_feats and remaining_feats:
+        best_feat = None
+        best_f1 = -np.inf
+
+        for cand in remaining_feats:
+            candidate_feats = current_feats + [cand]
+
+            X_tr = X_train_df[candidate_feats].to_numpy(dtype=float)
+            X_va = X_val_df[candidate_feats].to_numpy(dtype=float)
+
+            pipe = Pipeline([
+                ("scaler", StandardScaler()),
+                ("mlp", build_mlp()),
+            ])
+            pipe.fit(X_tr, y_train)
+            y_hat = pipe.predict(X_va)
+            f1m = f1_score(y_val, y_hat, average="macro")
+
+            if f1m > best_f1:
+                best_f1 = f1m
+                best_feat = cand
+
+        if best_feat is None:
+            logger.warning("Fold %d: Kein weiteres Feature verbessert die Performance.", fold)
+            break
+
+        current_feats.append(best_feat)
+        remaining_feats.remove(best_feat)
+        logger.info(
+            "Fold %d: Feature %s hinzugefügt -> %d Features, bestes f1_macro=%.4f",
+            fold, best_feat, len(current_feats), best_f1,
+        )
+
+    return current_feats
 
 
 # ------------------- CV & Training -------------------
@@ -216,24 +287,6 @@ def run_group_cv(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> Dic
     # Feature-Spalten = alles, was nicht meta + nicht label
     drop_cols = META_COLS | LABEL_COLS | {"label"}
     candidate_feats = [c for c in df.columns if c not in drop_cols]
-
-    # Whitelist anwenden (falls gesetzt)
-    if FEATURE_WHITELIST is not None:
-        before = len(candidate_feats)
-        candidate_feats = [c for c in candidate_feats if c in FEATURE_WHITELIST]
-        logger.info(
-            "Feature-Whitelist aktiv: %d -> %d Kandidaten (Intersection mit CSV-Spalten).",
-            before, len(candidate_feats)
-        )
-        missing = [f for f in FEATURE_WHITELIST if f not in candidate_feats]
-        if missing:
-            logger.warning(
-                "Einige Whitelist-Features sind nicht im DataFrame vorhanden oder wurden gedroppt: %s",
-                missing,
-            )
-
-    if not candidate_feats:
-        raise ValueError("Keine Feature-Spalten nach Whitelist/Filterung übrig!")
 
     # komplett leere Spalten rausfiltern
     non_empty_feats = []
@@ -253,8 +306,9 @@ def run_group_cv(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> Dic
         )
 
     feat_cols = non_empty_feats
-    logger.info("Verwende %d Feature-Spalten.", len(feat_cols))
+    logger.info("Verwende %d Feature-Spalten (ohne komplett leere).", len(feat_cols))
 
+    # DataFrame der Features behalten, damit wir nach Selektion per Spaltennamen auswählen können
     feat_df = df[feat_cols].reset_index(drop=True)
     y = df["label"].to_numpy()
     groups = df["subject"].to_numpy()
@@ -264,11 +318,11 @@ def run_group_cv(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> Dic
     all_true = []
     all_pred = []
     fold_rows = []
-    pred_rows = []  # out-of-fold Predictions
+    pred_rows = []  # out-of-fold Predictions für spätere Plots
+
     best_fold = None
     best_f1m = -np.inf
-
-    best_params_per_fold: Dict[int, Dict[str, Any]] = {}
+    best_selected_features: List[str] | None = None
 
     t0_all = time.perf_counter()
 
@@ -285,67 +339,55 @@ def run_group_cv(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> Dic
         X_val_df = feat_df.iloc[va_idx].reset_index(drop=True)
         y_train = y[tr_idx]
         y_val = y[va_idx]
-        groups_train = groups[tr_idx]
 
-        X_train = X_train_df.to_numpy(dtype=float)
-        X_val = X_val_df.to_numpy(dtype=float)
+        # ---------- Greedy Forward Selection mit Whitelist ----------
+        if cfg.use_rfe:
+            selected_cols = greedy_forward_selection(
+                X_train_df=X_train_df,
+                y_train=y_train,
+                X_val_df=X_val_df,
+                y_val=y_val,
+                feat_cols=feat_cols,
+                cfg=cfg,
+                logger=logger,
+                fold=fold,
+            )
 
-        # ---------- Pipeline + Hyperparameter-Optimierung ----------
-        base_mlp = build_base_mlp(cfg.random_state)
+            logger.info(
+                "Fold %d: Greedy-Forward-Selection fertig, ausgewählte Features: %d",
+                fold, len(selected_cols),
+            )
+
+            # ausgewählte Features für diesen Fold speichern
+            with open(cfg.out_dir / f"selected_features_fold{fold}.txt", "w", encoding="utf-8") as f:
+                for col in selected_cols:
+                    f.write(f"{col}\n")
+
+            X_train_sel = X_train_df[selected_cols].to_numpy(dtype=float)
+            X_val_sel = X_val_df[selected_cols].to_numpy(dtype=float)
+        else:
+            selected_cols = feat_cols
+            X_train_sel = X_train_df.to_numpy(dtype=float)
+            X_val_sel = X_val_df.to_numpy(dtype=float)
+        # -------------------------------------------------------------------
+
+        # Plain MLP für diesen Fold
+        mlp = build_mlp()
 
         pipe = Pipeline([
             ("scaler", StandardScaler()),
-            ("mlp", base_mlp),
+            ("mlp", mlp),
         ])
 
-        if cfg.use_hyperopt:
-            param_distributions = get_hyperparam_distributions()
-            inner_cv_splits = min(3, cfg.n_folds)
-            inner_cv = GroupKFold(n_splits=inner_cv_splits)
+        pipe.fit(X_train_sel, y_train)
 
-            logger.info(
-                "Fold %d: Starte RandomizedSearchCV mit %d Iterationen, inner CV=%d.",
-                fold, cfg.n_iter_search, inner_cv_splits
-            )
-
-            search = RandomizedSearchCV(
-                estimator=pipe,
-                param_distributions=param_distributions,
-                n_iter=cfg.n_iter_search,
-                scoring="f1_macro",
-                cv=inner_cv,
-                random_state=cfg.random_state,
-                n_jobs=-1,
-                verbose=1,
-                refit=True,
-            )
-
-            search.fit(X_train, y_train, groups=groups_train)
-            best_model = search.best_estimator_
-            best_params = search.best_params_
-            best_cv_score = search.best_score_
-
-            logger.info("Fold %d: Beste Hyperparameter: %s", fold, best_params)
-            logger.info("Fold %d: Bester inner-CV f1_macro=%.4f", fold, best_cv_score)
-
-            best_params_per_fold[fold] = {
-                "best_params": best_params,
-                "best_inner_cv_f1_macro": float(best_cv_score),
-            }
-
-        else:
-            logger.info("Fold %d: Hyperparameter-Suche deaktiviert, verwende Basis-MLP.", fold)
-            best_model = pipe
-            best_model.fit(X_train, y_train)
-
+        classes = pipe.named_steps["mlp"].classes_
         # Vorhersage auf Val-Set
-        y_hat = best_model.predict(X_val)
-        if hasattr(best_model, "predict_proba"):
-            y_proba = best_model.predict_proba(X_val)
-            classes = best_model.named_steps["mlp"].classes_
+        y_hat = pipe.predict(X_val_sel)
+        if hasattr(pipe, "predict_proba"):
+            y_proba = pipe.predict_proba(X_val_sel)
         else:
             y_proba = None
-            classes = None
 
         # Metriken
         acc = accuracy_score(y_val, y_hat)
@@ -353,8 +395,8 @@ def run_group_cv(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> Dic
         f1m = f1_score(y_val, y_hat, average="macro")
 
         logger.info(
-            "Fold %d/%d: acc=%.4f | bAcc=%.4f | f1_macro=%.4f | n_features=%d",
-            fold, cfg.n_folds, acc, bacc, f1m, len(feat_cols),
+            "Fold %d/%d: acc=%.4f | bAcc=%.4f | f1_macro=%.4f | n_feats=%d",
+            fold, cfg.n_folds, acc, bacc, f1m, len(selected_cols),
         )
 
         # Confusion Matrix & Report pro Fold
@@ -377,7 +419,7 @@ def run_group_cv(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> Dic
                 "true_label": y_val[i],
                 "pred_label": y_hat[i],
             }
-            if y_proba is not None and classes is not None:
+            if y_proba is not None:
                 for class_idx, cls_name in enumerate(classes):
                     row[f"proba_{cls_name}"] = float(y_proba[i, class_idx])
             pred_rows.append(row)
@@ -391,7 +433,7 @@ def run_group_cv(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> Dic
             "f1_macro": f1m,
             "n_train_samples": int(len(tr_idx)),
             "n_val_samples": int(len(va_idx)),
-            "n_features_used": int(len(feat_cols)),
+            "n_features_used": int(len(selected_cols)),
             "train_subjects": ",".join(map(str, train_subjects)),
             "val_subjects": ",".join(map(str, val_subjects)),
         })
@@ -403,13 +445,14 @@ def run_group_cv(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> Dic
         if f1m > best_f1m:
             best_f1m = f1m
             best_fold = fold
+            best_selected_features = selected_cols
 
         elapsed = time.perf_counter() - t0
         logger.info("Fold %d done in %.1fs", fold, elapsed)
 
-        # Modell speichern (pro Fold)
+        # Modell + Info zu den verwendeten Features dieses Folds speichern
         final_model_path = cfg.out_dir / f"fold{fold}_model.joblib"
-        joblib.dump({"model": best_model, "feature_cols": feat_cols}, final_model_path)
+        joblib.dump({"model": pipe, "selected_features": selected_cols}, final_model_path)
 
     # Pooled Ergebnisse
     all_true = np.concatenate(all_true)
@@ -454,11 +497,12 @@ def run_group_cv(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> Dic
         "pooled_accuracy": float(acc_all),
         "pooled_balanced_accuracy": float(bacc_all),
         "pooled_f1_macro": float(f1m_all),
-        "feature_cols_used": feat_cols,
-        "feature_whitelist_active": FEATURE_WHITELIST is not None,
+        "all_feature_cols": feat_cols,
+        "rfe_enabled": bool(cfg.use_rfe),
+        "rfe_n_features_target": int(cfg.rfe_n_features),
         "best_fold": int(best_fold) if best_fold is not None else None,
         "best_fold_f1_macro": float(best_f1m) if best_fold is not None else None,
-        "best_params_per_fold": {str(k): v for k, v in best_params_per_fold.items()},
+        "best_fold_selected_features": best_selected_features,
     }
 
     with open(cfg.out_dir / "metrics_summary.json", "w", encoding="utf-8") as f:
@@ -488,11 +532,13 @@ if __name__ == "__main__":
 
         cfg = TrainCfg(
             csv_path=base_csv,
-            out_dir=Path(f"outputs_20w10s_whitelist_hyperopt/{exp_name}"),
+            out_dir=Path(f"outputs_20w10s_plain_greedy/{exp_name}"),
             random_state=42,
             classes_to_keep=classes,
-            use_hyperopt=True,
-            n_iter_search=100,  # hier kannst du die Suchintensität anpassen
+            use_rfe=False,
+            # WICHTIG: Wenn du willst, dass neben der Whitelist noch weitere Features
+            # dazu kommen, muss dieser Wert > len(WHITELIST_FEATURES) sein:
+            rfe_n_features=2,
         )
 
         np.random.seed(cfg.random_state)
@@ -517,7 +563,8 @@ if __name__ == "__main__":
             if "bored" in df["label"].unique():
                 df = downsample_class(df, "bored", cfg, logger)
 
-        # GroupKFold-CV mit Hyperparameter-Optimierung pro Fold
+        # GroupKFold-CV mit Greedy-Feature-Selektion (Whitelist + jeweils 1 dazu)
         summary = run_group_cv(df, cfg, logger)
+        feat_cols = summary.get("all_feature_cols", [])
 
         logger.info("Experiment %s fertig.", exp_name)
