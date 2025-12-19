@@ -228,7 +228,7 @@ def plot_single_subject(subject_id: int,
 
 def main():
     cfg = PlotCfg(
-        cv_pred_path=Path("outputs_60w30s_plain/scary_vs_bored/cv_predictions.csv"),
+        cv_pred_path=Path("outputs_20w10s_plain/scary_vs_bored/cv_predictions.csv"),
         out_dir=Path("figs_rf_scary_vs_bored_20w10s"),
         exp_pos="scary",
         exp_neg="bored",
