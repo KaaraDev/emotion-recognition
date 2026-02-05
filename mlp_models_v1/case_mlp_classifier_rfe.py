@@ -461,119 +461,119 @@ def run_group_cv(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> Dic
 # ------------------- main -------------------
 
 if __name__ == "__main__":
-    base_csv = Path("features_case_20w10s/combined.csv.gz")
+    base_csv = Path("features_case_vB_20w10s/combined.parquet")
 
     feature_groups = {
-        "cardio": [  # Herz / Kreislauf (ECG + HRV + BVP/PPG)
+        "cardio": [  # Herz/Kreislauf (ECG + BVP/PPG + Rates)
             # ECG Statistik
-            "ecg_mean", "ecg_std", "ecg_min", "ecg_max", "ecg_slope_per_s",
-            "ecg_rate_mean", "ecg_rate_std",
+            "ecg_mean", "ecg_std", "ecg_min", "ecg_max", "ecg_median",
+            "ecg_iqr", "ecg_range", "ecg_slope_per_s",
 
-            # ECG HRV Time Domain
-            "ecg_HRV_MeanNN", "ecg_HRV_MedianNN", "ecg_HRV_MinNN", "ecg_HRV_MaxNN",
-            "ecg_HRV_Prc20NN", "ecg_HRV_Prc80NN", "ecg_HRV_IQRNN", "ecg_HRV_MadNN",
-            "ecg_HRV_MCVNN", "ecg_HRV_SDNN", "ecg_HRV_RMSSD", "ecg_HRV_SDSD",
-            "ecg_HRV_CVNN", "ecg_HRV_CVSD", "ecg_HRV_SDRMSSD", "ecg_HRV_pNN50",
-            "ecg_HRV_pNN20",
+            # ECG Rate (Heart Rate aus ECG)
+            "ecg_rate_mean", "ecg_rate_std", "ecg_rate_min", "ecg_rate_max",
+            "ecg_rate_median", "ecg_rate_iqr", "ecg_rate_range", "ecg_rate_slope_per_s",
 
-            # ECG HRV Frequency Domain
-            "ecg_HRV_HF", "ecg_HRV_VHF", "ecg_HRV_TP", "ecg_HRV_HFn",
-            "ecg_HRV_LnHF", "ecg_HRV_TINN", "ecg_HRV_HTI",
-
-            # ECG Differenzen
-            "ecg_diff_mean", "ecg_diff_std", "ecg_pos_diff_ratio",
-
-            # BVP
-            "bvp_mean", "bvp_std", "bvp_min", "bvp_max", "bvp_slope_per_s",
+            # BVP Statistik
+            "bvp_mean", "bvp_std", "bvp_min", "bvp_max", "bvp_median",
+            "bvp_iqr", "bvp_range", "bvp_slope_per_s",
 
             # PPG Rate
-            "ppg_rate_mean", "ppg_rate_std",
-
-            # BVP Differenzen
-            "bvp_diff_mean", "bvp_diff_std", "bvp_pos_diff_ratio",
+            "ppg_rate_mean", "ppg_rate_std", "ppg_rate_min", "ppg_rate_max",
+            "ppg_rate_median", "ppg_rate_iqr", "ppg_rate_range", "ppg_rate_slope_per_s",
         ],
 
-        "eda": [  # Hautleitwert EDA/GSR
+        "eda": [  # Hautleitwert (GSR + Tonic/Phasic + SCR)
             # GSR Statistik
-            "gsr_mean", "gsr_std", "gsr_min", "gsr_max", "gsr_slope_per_s",
+            "gsr_mean", "gsr_std", "gsr_min", "gsr_max", "gsr_median",
+            "gsr_iqr", "gsr_range", "gsr_slope_per_s",
 
-            # SCR / phasic / tonic
-            "eda_SCR_Peaks_N", "eda_SCR_Peaks_Amplitude_Mean",
-            "eda_EDA_Tonic_SD", "eda_tonic_mean", "eda_phasic_mean",
+            # EDA tonic / phasic
+            "eda_tonic_mean", "eda_tonic_std", "eda_tonic_min", "eda_tonic_max",
+            "eda_tonic_median", "eda_tonic_iqr", "eda_tonic_range", "eda_tonic_slope_per_s",
+            "eda_phasic_mean", "eda_phasic_std", "eda_phasic_min", "eda_phasic_max",
+            "eda_phasic_median", "eda_phasic_iqr", "eda_phasic_range", "eda_phasic_slope_per_s",
 
-            # GSR Differenzen
-            "gsr_diff_mean", "gsr_diff_std", "gsr_pos_diff_ratio",
+            # SCR Peaks / Amplitude / Rise / Recovery
+            "scr_peaks_mean", "scr_peaks_std", "scr_peaks_max", "scr_peaks_range", "scr_peaks_slope_per_s",
+            "scr_amplitude_mean", "scr_amplitude_std", "scr_amplitude_max", "scr_amplitude_range",
+            "scr_amplitude_slope_per_s",
+            "scr_risetime_mean", "scr_risetime_std", "scr_risetime_max", "scr_risetime_range",
+            "scr_risetime_slope_per_s",
+            "scr_recoverytime_mean", "scr_recoverytime_std", "scr_recoverytime_max", "scr_recoverytime_range",
+            "scr_recoverytime_slope_per_s",
+
+            # SCR Count + “scr_amp_*” (zweite Feature-Variante bei dir)
+            "scr_count",
+            "scr_amp_mean", "scr_amp_median", "scr_amp_std", "scr_amp_max", "scr_amp_min", "scr_amp_iqr",
         ],
 
-        "respiration": [  # Atmung RSP + RRV + Phase
+        "respiration": [  # Atmung (RSP + Rate + Amplitude)
             # RSP Statistik
-            "rsp_mean", "rsp_std", "rsp_min", "rsp_max", "rsp_slope_per_s",
-            "rsp_rate_mean", "rsp_rate_std",
+            "rsp_mean", "rsp_std", "rsp_min", "rsp_max", "rsp_median",
+            "rsp_iqr", "rsp_range", "rsp_slope_per_s",
 
-            # RRV Time Domain & Advanced
-            "rsp_RRV_RMSSD", "rsp_RRV_MeanBB", "rsp_RRV_SDBB", "rsp_RRV_SDSD",
-            "rsp_RRV_CVBB", "rsp_RRV_CVSD", "rsp_RRV_MedianBB", "rsp_RRV_MadBB",
-            "rsp_RRV_MCVBB", "rsp_RRV_HF", "rsp_RRV_SD1", "rsp_RRV_SD2",
-            "rsp_RRV_SD2SD1", "rsp_RRV_ApEn", "rsp_RRV_SampEn",
+            # RSP Rate
+            "rsp_rate_mean", "rsp_rate_std", "rsp_rate_min", "rsp_rate_max",
+            "rsp_rate_median", "rsp_rate_iqr", "rsp_rate_range", "rsp_rate_slope_per_s",
 
-            # Atemvolumen & Symmetrie
-            "rsp_RAV_Mean", "rsp_RAV_SD", "rsp_RAV_RMSSD", "rsp_RAV_CVSD",
-            "rsp_RSP_Rate_Mean", "rsp_RSP_RVT",
-            "rsp_RSP_Symmetry_PeakTrough", "rsp_RSP_Symmetry_RiseDecay",
-            "rsp_RSP_Phase_Duration_Inspiration",
-            "rsp_RSP_Phase_Duration_Expiration",
-            "rsp_RSP_Phase_Duration_Ratio",
+            # RSP Amplitude
+            "rsp_amplitude_mean", "rsp_amplitude_std", "rsp_amplitude_min", "rsp_amplitude_max",
+            "rsp_amplitude_median", "rsp_amplitude_iqr", "rsp_amplitude_range", "rsp_amplitude_slope_per_s",
         ],
 
-        "emg": [  # Muskelaktivität EMG (Zygomaticus, Corrugator, Trapezius)
-            # Zygomaticus
+        "emg": [  # Muskelaktivität (Zygomaticus, Corrugator, Trapezius)
+            # Zygomaticus (raw stats)
             "emg_zygo_mean", "emg_zygo_std", "emg_zygo_min", "emg_zygo_max",
-            "emg_zygo_slope_per_s", "emg_zygo_diff_mean", "emg_zygo_diff_std",
-            "emg_zygo_pos_diff_ratio",
+            "emg_zygo_median", "emg_zygo_iqr", "emg_zygo_range", "emg_zygo_slope_per_s",
 
-            # Corrugator
+            # Corrugator (raw stats)
             "emg_coru_mean", "emg_coru_std", "emg_coru_min", "emg_coru_max",
-            "emg_coru_slope_per_s", "emg_coru_diff_mean", "emg_coru_diff_std",
-            "emg_coru_pos_diff_ratio",
+            "emg_coru_median", "emg_coru_iqr", "emg_coru_range", "emg_coru_slope_per_s",
 
-            # Trapezius
+            # Trapezius (raw stats)
             "emg_trap_mean", "emg_trap_std", "emg_trap_min", "emg_trap_max",
-            "emg_trap_slope_per_s", "emg_trap_diff_mean", "emg_trap_diff_std",
-            "emg_trap_pos_diff_ratio",
+            "emg_trap_median", "emg_trap_iqr", "emg_trap_range", "emg_trap_slope_per_s",
+
+            # Zygomaticus amplitude stats
+            "emg_zygo_amplitude_mean", "emg_zygo_amplitude_std", "emg_zygo_amplitude_min", "emg_zygo_amplitude_max",
+            "emg_zygo_amplitude_median", "emg_zygo_amplitude_iqr", "emg_zygo_amplitude_range",
+            "emg_zygo_amplitude_slope_per_s",
+
+            # Corrugator amplitude stats
+            "emg_coru_amplitude_mean", "emg_coru_amplitude_std", "emg_coru_amplitude_min", "emg_coru_amplitude_max",
+            "emg_coru_amplitude_median", "emg_coru_amplitude_iqr", "emg_coru_amplitude_range",
+            "emg_coru_amplitude_slope_per_s",
+
+            # Trapezius amplitude stats
+            "emg_trap_amplitude_mean", "emg_trap_amplitude_std", "emg_trap_amplitude_min", "emg_trap_amplitude_max",
+            "emg_trap_amplitude_median", "emg_trap_amplitude_iqr", "emg_trap_amplitude_range",
+            "emg_trap_amplitude_slope_per_s",
         ],
 
         "temperature": [  # Skin Temperature (SKT)
-            "skt_mean", "skt_std", "skt_min", "skt_max", "skt_slope_per_s",
-            "skt_diff_mean", "skt_diff_std", "skt_pos_diff_ratio",
+            "skt_mean", "skt_std", "skt_min", "skt_max", "skt_median",
+            "skt_iqr", "skt_range", "skt_slope_per_s",
         ],
 
-        "difference_features": [  # Alle reinen Differenz-Features (falls separat gewünscht)
-            # ECG
+        "difference_features": [  # Reine Differenz-Features
             "ecg_diff_mean", "ecg_diff_std", "ecg_pos_diff_ratio",
-
-            # BVP
             "bvp_diff_mean", "bvp_diff_std", "bvp_pos_diff_ratio",
-
-            # GSR
             "gsr_diff_mean", "gsr_diff_std", "gsr_pos_diff_ratio",
-
-            # RSP
-            "rsp_diff_mean", "rsp_diff_std", "rsp_pos_diff_ratio"
-            if "rsp_diff_mean" in globals() else None,  # Falls nicht in deinem Datensatz
-
-            # SKT
+            "rsp_diff_mean", "rsp_diff_std", "rsp_pos_diff_ratio",
             "skt_diff_mean", "skt_diff_std", "skt_pos_diff_ratio",
-
-            # EMG
             "emg_zygo_diff_mean", "emg_zygo_diff_std", "emg_zygo_pos_diff_ratio",
             "emg_coru_diff_mean", "emg_coru_diff_std", "emg_coru_pos_diff_ratio",
             "emg_trap_diff_mean", "emg_trap_diff_std", "emg_trap_pos_diff_ratio",
-        ]
+        ],
     }
 
     # <<< BEISPIEL: hier deine Whitelist eintragen >>>
     # z.B. aus deiner Feature-Gruppierung / vorherigem Experiment
-    FEATURE_WHITELIST = feature_groups["cardio"]
+    FEATURE_WHITELIST = [
+        feature
+        for group in feature_groups.values()
+        for feature in group
+    ]
 
     experiments = [
         ("scary_vs_bored", ["scary", "bored"]),
@@ -587,11 +587,11 @@ if __name__ == "__main__":
 
         cfg = TrainCfg(
             csv_path=base_csv,
-            out_dir=Path(f"outputs_20w10s_cardio_rfe/{exp_name}"),
+            out_dir=Path(f"outputs_20w10s_vB_cardio_rfe/{exp_name}"),
             random_state=42,
             classes_to_keep=classes,
             use_rfe=True,
-            rfe_n_features=8,  # hier kannst du mit der Zielanzahl spielen
+            rfe_n_features=21,  # hier kannst du mit der Zielanzahl spielen
             feature_whitelist=FEATURE_WHITELIST,  # <<< NEU: Whitelist hier übergeben
         )
 

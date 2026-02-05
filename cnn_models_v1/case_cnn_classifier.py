@@ -641,9 +641,9 @@ def run_binary_experiment(
 def main():
     cfg = TrainCfg(
         noninterp_phys_dir=Path(
-            r"C:\Users\metin\OneDrive\Desktop\Informatik\10.Semester\thesis\emotion-recognition\case_dataset-master\data\non-interpolated\physiological"
+            r"C:\Users\metin\OneDrive\Desktop\Informatik\10.Semester\thesis\emotion-recognition\case_dataset-master\data\interpolated\physiological"
         ),
-        out_dir=Path("outputs_cnn_noninterp_binary_60w30s"),
+        out_dir=Path("outputs_cnn_interp_binary_60w30s"),
     )
 
     cfg.out_dir.mkdir(parents=True, exist_ok=True)

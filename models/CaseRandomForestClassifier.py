@@ -439,7 +439,7 @@ if __name__ == "__main__":
 
         cfg = TrainCfg(
             csv_path=base_csv,
-            out_dir=Path(f"outputs_60w30s/{exp_name}"),
+            out_dir=Path(f"outputs_vB_20w10s/{exp_name}"),
             random_state=42,
             classes_to_keep=classes,
         )

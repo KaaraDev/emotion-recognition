@@ -25,20 +25,27 @@ import joblib
 # ------------------- Feature-Whitelist -------------------
 # Hier deine finalen Features eintragen (alle müssen Spaltennamen im CSV sein).
 FEATURE_WHITELIST: List[str] | None = [
-    "gsr_mean",
     "gsr_std",
-    "gsr_min",
-    "gsr_max",
     "gsr_slope_per_s",
-    "eda_SCR_Peaks_N",
-    "eda_SCR_Peaks_Amplitude_Mean",
-    "eda_EDA_Tonic_SD",
-    "eda_EDA_Autocorrelation",
-    "eda_tonic_mean",
-    "eda_phasic_mean",
+    "rsp_median",
+    "skt_slope_per_s",
+    "emg_coru_median",
+    "emg_trap_range",
+    "eda_tonic_slope_per_s",
+    "eda_phasic_std",
+    "eda_phasic_min",
+    "eda_phasic_max",
+    "eda_phasic_iqr",
+    "eda_phasic_range",
+    "scr_amplitude_std",
+    "scr_amplitude_max",
+    "emg_zygo_amplitude_mean",
+    "emg_coru_amplitude_mean",
+    "scr_amp_mean",
     "gsr_diff_mean",
     "gsr_diff_std",
     "gsr_pos_diff_ratio",
+    "emg_trap_diff_std"
 ]
 
 
@@ -474,7 +481,7 @@ def run_group_cv(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> Dic
 # ------------------- main -------------------
 
 if __name__ == "__main__":
-    base_csv = Path("features_case_20w10s/combined.csv.gz")
+    base_csv = Path("features_case_vB_20w10s/combined.parquet")
 
     experiments = [
         ("scary_vs_bored", ["scary", "bored"]),
@@ -488,7 +495,7 @@ if __name__ == "__main__":
 
         cfg = TrainCfg(
             csv_path=base_csv,
-            out_dir=Path(f"outputs_20w10s_whitelist_hyperopt/{exp_name}"),
+            out_dir=Path(f"outputs_20w10s_vB_whitelist_hyperopt/{exp_name}"),
             random_state=42,
             classes_to_keep=classes,
             use_hyperopt=True,

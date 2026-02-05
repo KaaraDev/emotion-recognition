@@ -343,7 +343,7 @@ def run_group_cv(df: pd.DataFrame, cfg: TrainCfg, logger: logging.Logger) -> Dic
 # ------------------- main -------------------
 
 if __name__ == "__main__":
-    base_csv = Path("features_case_20w10s/combined.csv.gz")
+    base_csv = Path("features_case_vA_20w10s/combined.parquet")
 
     experiments = [
         ("scary_vs_amused", ["scary", "amused"]),
@@ -357,7 +357,7 @@ if __name__ == "__main__":
 
         cfg = TrainCfg(
             csv_path=base_csv,
-            out_dir=Path(f"outputs_20w10s_plain/{exp_name}"),
+            out_dir=Path(f"outputs_20w10s_plain_vA/{exp_name}"),
             random_state=42,
             classes_to_keep=classes,
         )

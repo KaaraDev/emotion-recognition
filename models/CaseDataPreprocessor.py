@@ -684,8 +684,8 @@ if __name__ == "__main__":
 
     prep = CaseDataPreprocessor(
         base_path=base_path,
-        window_size=20,
-        step_size=10,
+        window_size=60,
+        step_size=30,
         subjects=list(range(1, 31)),
         label_shift_s=0.0,
         use_video_as_feature=False,
@@ -697,7 +697,7 @@ if __name__ == "__main__":
     X, yv, ya, meta = prep.prepare_all()
 
     # ---------------- Cleanup & Feature-Selektion ----------------
-    out_dir = Path("features_case_20w10s")
+    out_dir = Path("../mlp_models_v1/features_case_60w30s")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 1) Inf-Werte in NaN umwandeln

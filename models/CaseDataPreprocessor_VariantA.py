@@ -1,0 +1,622 @@
+from __future__ import annotations
+
+from pathlib import Path
+from dataclasses import dataclass
+from typing import Dict, List, Tuple, Optional
+import warnings
+
+import numpy as np
+import pandas as pd
+import neurokit2 as nk
+
+
+@dataclass
+class WindowMeta:
+    subject: int
+    start_s: float
+    end_s: float
+    video: Optional[int]
+
+
+class CaseDataPreprocessor:
+    """
+    Variante A:
+    - NeuroKit2 *_process() wird PRO WINDOW ausgeführt (innerhalb extract_features()).
+    - Windowing (z.B. 20/10s) bleibt wie gehabt.
+    - Output: Features pro Fenster + (valence/arousal) Labels pro Fenster + meta.
+
+    Hinweis:
+    - Variante A ist bei 20/10s + 30 Subjects deutlich langsamer als Variante B,
+      weil NeuroKit2 pro Fenster läuft.
+    """
+
+    def __init__(
+            self,
+            base_path: str | Path,
+            window_size: int = 20,
+            step_size: int = 10,
+            subjects: Optional[List[int]] = None,
+            label_shift_s: float = 0.0,
+            use_video_as_feature: bool = False,
+            normalize_video_lengths: bool = False,
+            target_video_len_s: Optional[float] = None,
+            use_raw: bool = True,
+            # --- Neu/Optionen ---
+            add_neurokit_features: bool = True,  # <- Variante A: NK-Features pro Window
+            neurokit_min_seconds_ecg_ppg_eda_rsp: float = 5.0,
+            neurokit_min_seconds_emg: float = 2.0,
+            fillna_value: float = 0.0,
+    ):
+        self.base_path = Path(base_path)
+        self.window_size = int(window_size)
+        self.step_size = int(step_size)
+        self.subjects = subjects or list(range(1, 30))
+        self.label_shift_s = float(label_shift_s)
+        self.use_video_as_feature = use_video_as_feature
+        self.normalize_video_lengths = bool(normalize_video_lengths)
+        self.target_video_len_s = target_video_len_s
+        self.use_raw = bool(use_raw)
+
+        self.add_neurokit_features = bool(add_neurokit_features)
+        self.neurokit_min_seconds_ecg_ppg_eda_rsp = float(neurokit_min_seconds_ecg_ppg_eda_rsp)
+        self.neurokit_min_seconds_emg = float(neurokit_min_seconds_emg)
+        self.fillna_value = float(fillna_value)
+
+        # Roh-Physio-Kanäle
+        self.phys_cols = [
+            "ecg", "bvp", "gsr", "rsp", "skt",
+            "emg_zygo", "emg_coru", "emg_trap"
+        ]
+
+    # -------------------- Helpers --------------------
+
+    @staticmethod
+    def _safe_arr(x: np.ndarray) -> np.ndarray:
+        x = np.asarray(x, dtype=float)
+        return x[np.isfinite(x)]
+
+    @staticmethod
+    def _iqr(x: np.ndarray) -> float:
+        x = CaseDataPreprocessor._safe_arr(x)
+        if x.size == 0:
+            return 0.0
+        return float(np.percentile(x, 75) - np.percentile(x, 25))
+
+    @staticmethod
+    def _std(x: np.ndarray) -> float:
+        x = CaseDataPreprocessor._safe_arr(x)
+        if x.size < 2:
+            return 0.0
+        return float(np.std(x, ddof=1))
+
+    @staticmethod
+    def _slope_idx(y: np.ndarray) -> float:
+        """Slope w.r.t. index (samples)."""
+        y = np.asarray(y, dtype=float)
+        y = y[np.isfinite(y)]
+        n = len(y)
+        if n < 2 or np.allclose(np.nanstd(y), 0):
+            return 0.0
+        x = np.arange(n, dtype=float)
+        x_mean = x.mean()
+        y_mean = np.nanmean(y)
+        num = np.nansum((x - x_mean) * (y - y_mean))
+        den = np.nansum((x - x_mean) ** 2)
+        if den == 0:
+            return 0.0
+        return float(num / den)
+
+    def _slope_per_second(self, y: np.ndarray, fs_local: float) -> float:
+        if fs_local <= 0:
+            return 0.0
+        return self._slope_idx(y) * fs_local
+
+    def _estimate_fs(self, window: pd.DataFrame) -> float:
+        t = window["time_s"].to_numpy(dtype=float)
+        if len(t) < 2:
+            return 0.0
+        diffs = np.diff(t)
+        dt = np.median(diffs)
+        if dt <= 0:
+            return 0.0
+        return float(1.0 / dt)
+
+    def _add_stats(self, feats: Dict[str, float], name: str, y: np.ndarray, fs_local: float) -> None:
+        yv = self._safe_arr(y)
+        if yv.size == 0:
+            feats[f"{name}_mean"] = 0.0
+            feats[f"{name}_std"] = 0.0
+            feats[f"{name}_min"] = 0.0
+            feats[f"{name}_max"] = 0.0
+            feats[f"{name}_median"] = 0.0
+            feats[f"{name}_iqr"] = 0.0
+            feats[f"{name}_range"] = 0.0
+            feats[f"{name}_slope_per_s"] = 0.0
+            return
+
+        feats[f"{name}_mean"] = float(np.mean(yv))
+        feats[f"{name}_std"] = self._std(yv)
+        feats[f"{name}_min"] = float(np.min(yv))
+        feats[f"{name}_max"] = float(np.max(yv))
+        feats[f"{name}_median"] = float(np.median(yv))
+        feats[f"{name}_iqr"] = self._iqr(yv)
+        feats[f"{name}_range"] = float(np.max(yv) - np.min(yv))
+        feats[f"{name}_slope_per_s"] = self._slope_per_second(yv, fs_local)
+
+    # -------------------- Loading --------------------
+
+    def load_subject(self, subject_id: int) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Lädt:
+        - physiologische Daten (interpolated physiological) + interpolierte Annotationen
+        Ergebnis:
+        - phys: hat time_s + phys channels + video
+        - ann : hat time_s + valence/arousal (+ optional video)
+        """
+        # Hinweis: so wie in deiner VariantB-Datei: use_raw=True nutzt interpolated physiological.
+        # Das ist okay, weil time_s dann sauber regelmäßig ist (und _estimate_fs stabil).
+        p_phys = (
+                self.base_path
+                / "case_dataset-master"
+                / "data"
+                / "interpolated"
+                / "physiological"
+                / f"sub_{subject_id}.csv"
+        )
+        p_ann = (
+                self.base_path
+                / "case_dataset-master"
+                / "data"
+                / "interpolated"
+                / "annotations"
+                / f"sub_{subject_id}.csv"
+        )
+
+        phys = pd.read_csv(p_phys)
+        ann = pd.read_csv(p_ann)
+
+        if "daqtime" not in phys.columns:
+            raise ValueError(f"'daqtime' fehlt in {p_phys}.")
+        if "jstime" not in ann.columns:
+            raise ValueError(f"'jstime' fehlt in {p_ann}.")
+
+        phys["time_s"] = phys["daqtime"].astype(float) / 1000.0
+        ann["time_s"] = ann["jstime"].astype(float) / 1000.0
+
+        required_phys_cols = [
+            "ecg", "bvp", "gsr", "rsp",
+            "skt", "emg_zygo", "emg_coru", "emg_trap", "video"
+        ]
+        missing = [c for c in required_phys_cols if c not in phys.columns]
+        if missing:
+            raise ValueError(f"In {p_phys} fehlen erwartete Spalten: {missing}")
+
+        if "valence" not in ann.columns or "arousal" not in ann.columns:
+            raise ValueError(f"'valence' und/oder 'arousal' fehlen in {p_ann}.")
+
+        return phys, ann
+
+    def interpolate_annotations(self, phys: pd.DataFrame, ann: pd.DataFrame) -> pd.DataFrame:
+        """
+        Interpoliert valence/arousal (und ggf. video) auf phys time_s.
+        """
+        out = phys.copy()
+        out["valence"] = np.interp(
+            out["time_s"].to_numpy(),
+            ann["time_s"].to_numpy(),
+            ann["valence"].to_numpy(),
+        )
+        out["arousal"] = np.interp(
+            out["time_s"].to_numpy(),
+            ann["time_s"].to_numpy(),
+            ann["arousal"].to_numpy(),
+        )
+
+        if "video" in ann.columns:
+            out["video"] = np.interp(
+                out["time_s"].to_numpy(),
+                ann["time_s"].to_numpy(),
+                ann["video"].to_numpy(),
+            ).round().astype(int)
+        elif "video" in phys.columns:
+            out["video"] = phys["video"]
+        else:
+            out["video"] = -1
+
+        return out
+
+    def _apply_label_shift(self, df: pd.DataFrame) -> pd.DataFrame:
+        if abs(self.label_shift_s) < 1e-9:
+            return df
+
+        shift_s = self.label_shift_s
+        out = df.copy()
+
+        out["valence_shifted"] = np.nan
+        out["arousal_shifted"] = np.nan
+
+        t = out["time_s"].to_numpy(dtype=float)
+        for i, ti in enumerate(t):
+            tgt_t = ti + shift_s
+            j = np.searchsorted(t, tgt_t)
+            if j < len(t):
+                out.at[i, "valence_shifted"] = out["valence"].iloc[j]
+                out.at[i, "arousal_shifted"] = out["arousal"].iloc[j]
+
+        out["valence"] = out["valence_shifted"]
+        out["arousal"] = out["arousal_shifted"]
+        out = out.drop(columns=["valence_shifted", "arousal_shifted"])
+
+        valid = out["valence"].notna() & out["arousal"].notna()
+        return out.loc[valid].reset_index(drop=True)
+
+    # -------------------- Windowing --------------------
+
+    def build_windows(self, df: pd.DataFrame) -> List[Tuple[int, int]]:
+        """
+        Fenster pro zusammenhängendem Video-Segment (keine Überschreitung von Video-Grenzen).
+        """
+        if "time_s" not in df.columns:
+            raise ValueError("Spalte 'time_s' fehlt im DataFrame.")
+        if "video" not in df.columns:
+            raise ValueError("Spalte 'video' fehlt im DataFrame – nötig für videoweise Fenster.")
+
+        times = df["time_s"].to_numpy(dtype=float)
+        videos = df["video"].to_numpy()
+        if len(times) == 0:
+            return []
+
+        idx_pairs: List[Tuple[int, int]] = []
+
+        change = np.r_[True, videos[1:] != videos[:-1]]
+        block_starts = np.flatnonzero(change)
+        block_ends = np.r_[block_starts[1:], len(videos)]
+
+        w = float(self.window_size)
+        step = float(self.step_size)
+
+        for b_start, b_end in zip(block_starts, block_ends):
+            seg_times = times[b_start:b_end]
+            if len(seg_times) < 2:
+                continue
+
+            t_start_seg = seg_times[0]
+            t_end_seg = seg_times[-1]
+
+            cur_start_t = t_start_seg
+            while cur_start_t + w <= t_end_seg + 1e-9:
+                t_lo = cur_start_t
+                t_hi = cur_start_t + w
+
+                in_window_local = np.where((seg_times >= t_lo) & (seg_times < t_hi))[0]
+                if len(in_window_local) > 1:
+                    s_idx = b_start + in_window_local[0]
+                    e_idx = b_start + in_window_local[-1] + 1
+                    idx_pairs.append((s_idx, e_idx))
+
+                cur_start_t += step
+
+        return idx_pairs
+
+    # -------------------- Features (Variante A: NeuroKit2 pro Window) --------------------
+
+    def _add_neurokit_features_per_window(self, feats: Dict[str, float], window: pd.DataFrame, fs: float) -> None:
+        """
+        Führt NeuroKit2 *_process() PRO WINDOW aus und schreibt robuste Aggregationen in feats.
+        """
+        if fs <= 0:
+            return
+
+        min5s = int(round(fs * self.neurokit_min_seconds_ecg_ppg_eda_rsp))
+        min2s = int(round(fs * self.neurokit_min_seconds_emg))
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+
+            # ECG
+            if "ecg" in window.columns:
+                y = window["ecg"].to_numpy(dtype=float)
+                if np.isfinite(y).sum() >= min5s:
+                    try:
+                        signals, info = nk.ecg_process(y, sampling_rate=fs)
+                        if "ECG_Rate" in signals:
+                            self._add_stats(feats, "ecg_rate", signals["ECG_Rate"].to_numpy(dtype=float), fs)
+                    except Exception:
+                        pass
+
+            # PPG/BVP
+            if "bvp" in window.columns:
+                y = window["bvp"].to_numpy(dtype=float)
+                if np.isfinite(y).sum() >= min5s:
+                    try:
+                        signals, info = nk.ppg_process(y, sampling_rate=fs)
+                        if "PPG_Rate" in signals:
+                            self._add_stats(feats, "ppg_rate", signals["PPG_Rate"].to_numpy(dtype=float), fs)
+                    except Exception:
+                        pass
+
+            # EDA/GSR
+            if "gsr" in window.columns:
+                y = window["gsr"].to_numpy(dtype=float)
+                if np.isfinite(y).sum() >= min5s:
+                    try:
+                        signals, info = nk.eda_process(y, sampling_rate=fs)
+
+                        if "EDA_Tonic" in signals:
+                            self._add_stats(feats, "eda_tonic", signals["EDA_Tonic"].to_numpy(dtype=float), fs)
+                        if "EDA_Phasic" in signals:
+                            self._add_stats(feats, "eda_phasic", signals["EDA_Phasic"].to_numpy(dtype=float), fs)
+
+                        # SCR robust: amplitude nur an Peaks und >0
+                        if "SCR_Peaks" in signals and "SCR_Amplitude" in signals:
+                            scr_peaks = signals["SCR_Peaks"].to_numpy(dtype=float)
+                            scr_amp = signals["SCR_Amplitude"].to_numpy(dtype=float)
+
+                            feats["scr_count"] = float(np.nansum(scr_peaks == 1)) if np.isfinite(
+                                scr_peaks).sum() else 0.0
+
+                            mask = (scr_peaks == 1) & np.isfinite(scr_amp) & (scr_amp > 0)
+                            scr_amp_peaks = scr_amp[mask]
+                            self._add_stats(feats, "scr_amp", scr_amp_peaks, fs)
+
+                        # Optional: Rise/Recovery als einfache Mittelwerte
+                        if "SCR_RiseTime" in signals:
+                            rt = signals["SCR_RiseTime"].to_numpy(dtype=float)
+                            rt = rt[np.isfinite(rt)]
+                            feats["scr_rise_time_mean"] = float(rt.mean()) if rt.size else 0.0
+                        if "SCR_RecoveryTime" in signals:
+                            rec = signals["SCR_RecoveryTime"].to_numpy(dtype=float)
+                            rec = rec[np.isfinite(rec)]
+                            feats["scr_recovery_time_mean"] = float(rec.mean()) if rec.size else 0.0
+
+                    except Exception:
+                        pass
+
+            # RSP
+            if "rsp" in window.columns:
+                y = window["rsp"].to_numpy(dtype=float)
+                if np.isfinite(y).sum() >= min5s:
+                    try:
+                        signals, info = nk.rsp_process(y, sampling_rate=fs)
+                        if "RSP_Rate" in signals:
+                            self._add_stats(feats, "rsp_rate", signals["RSP_Rate"].to_numpy(dtype=float), fs)
+                        if "RSP_Amplitude" in signals:
+                            self._add_stats(feats, "rsp_amp", signals["RSP_Amplitude"].to_numpy(dtype=float), fs)
+                    except Exception:
+                        pass
+
+            # EMG Amplitude
+            for src_col, out_name in [
+                ("emg_zygo", "emg_zygo_amp"),
+                ("emg_coru", "emg_coru_amp"),
+                ("emg_trap", "emg_trap_amp"),
+            ]:
+                if src_col in window.columns:
+                    y = window[src_col].to_numpy(dtype=float)
+                    if np.isfinite(y).sum() >= min2s:
+                        try:
+                            signals, info = nk.emg_process(y, sampling_rate=fs)
+                            if "EMG_Amplitude" in signals:
+                                self._add_stats(feats, out_name, signals["EMG_Amplitude"].to_numpy(dtype=float), fs)
+                        except Exception:
+                            pass
+
+    def extract_features(self, window: pd.DataFrame, fs_local: float) -> Dict[str, float]:
+        feats: Dict[str, float] = {}
+
+        # 1) Rohkanäle: Stats + slope
+        for sig in self.phys_cols:
+            if sig in window.columns:
+                self._add_stats(feats, sig, window[sig].to_numpy(dtype=float), fs_local)
+
+        # 2) Generische Dynamikfeatures (Rohkanäle)
+        for sig in self.phys_cols:
+            if sig in window.columns:
+                y = window[sig].to_numpy(dtype=float)
+                if len(y) > 1 and fs_local > 0:
+                    dy = np.diff(y) * fs_local
+                    dy = dy[np.isfinite(dy)]
+                    feats[f"{sig}_diff_mean"] = float(np.mean(dy)) if dy.size else 0.0
+                    feats[f"{sig}_diff_std"] = float(np.std(dy, ddof=1)) if dy.size >= 2 else 0.0
+                    feats[f"{sig}_pos_diff_ratio"] = float(np.mean(dy > 0)) if dy.size else 0.0
+                else:
+                    feats[f"{sig}_diff_mean"] = 0.0
+                    feats[f"{sig}_diff_std"] = 0.0
+                    feats[f"{sig}_pos_diff_ratio"] = 0.0
+
+        # 3) NeuroKit2 pro Window (Variante A)
+        if self.add_neurokit_features:
+            self._add_neurokit_features_per_window(feats, window, fs_local)
+
+        # 4) Optional: Video-ID als Feature
+        if self.use_video_as_feature and "video" in window.columns:
+            vid = int(np.round(window["video"].mode(dropna=False).iloc[0]))
+            feats["video_id"] = float(vid)
+
+        return feats
+
+    def _window_labels(self, window: pd.DataFrame) -> Tuple[float, float]:
+        return float(window["valence"].mean()), float(window["arousal"].mean())
+
+    # -------------------- Main pipeline --------------------
+
+    def prepare_all(self) -> Tuple[pd.DataFrame, pd.Series, pd.Series, pd.DataFrame]:
+        X_rows: List[Dict[str, float]] = []
+        y_val_list: List[float] = []
+        y_aro_list: List[float] = []
+        metas: List[WindowMeta] = []
+
+        for sid in self.subjects:
+            try:
+                phys, ann = self.load_subject(sid)
+            except FileNotFoundError:
+                print(f"[WARN] Dateien für Subject {sid} nicht gefunden – überspringe.")
+                continue
+
+            df = self.interpolate_annotations(phys, ann)
+
+            # (Optional) Zeit-Warping (normalerweise AUS!)
+            if self.normalize_video_lengths:
+                df = self._time_normalize_videos(df)
+
+            # Label shift
+            df = self._apply_label_shift(df)
+
+            # Fenster
+            idx_pairs = self.build_windows(df)
+            n_windows = len(idx_pairs)
+            if not n_windows:
+                print(f"[WARN] Keine Fenster für Subject {sid} – überspringe.")
+                continue
+
+            print(f"[INFO] Subject {sid}: {n_windows} Fenster – Starte Verarbeitung (Variante A, NK pro Window)...")
+
+            for i, (s_idx, e_idx) in enumerate(idx_pairs, start=1):
+                w = df.iloc[s_idx:e_idx]
+
+                fs_local = self._estimate_fs(w)
+                feats = self.extract_features(w, fs_local)
+                X_rows.append(feats)
+
+                v, a = self._window_labels(w)
+                y_val_list.append(v)
+                y_aro_list.append(a)
+
+                metas.append(
+                    WindowMeta(
+                        subject=sid,
+                        start_s=float(w["time_s"].iloc[0]),
+                        end_s=float(w["time_s"].iloc[-1]),
+                        video=int(np.round(w["video"].mode(dropna=False).iloc[0])) if "video" in w.columns else -1,
+                    )
+                )
+
+                if i % max(1, n_windows // 10) == 0 or i == n_windows:
+                    progress = 100 * i / n_windows
+                    print(f"    Fortschritt Subject {sid}: {progress:5.1f}%")
+
+            print(f"[DONE] Subject {sid} abgeschlossen.\n")
+
+        if not X_rows:
+            raise RuntimeError("Keine Fenster/Features erzeugt. Prüfe Pfade, Subjektliste und Parameter.")
+
+        X_df = pd.DataFrame(X_rows).reset_index(drop=True)
+        y_val = pd.Series(y_val_list, name="valence")
+        y_aro = pd.Series(y_aro_list, name="arousal")
+        meta_df = pd.DataFrame([m.__dict__ for m in metas])
+
+        # Cleanup
+        X_df = X_df.replace([np.inf, -np.inf], np.nan)
+        X_df = X_df.fillna(self.fillna_value)
+
+        # Konstanten entfernen
+        nunique_per_col = X_df.nunique(dropna=False)
+        constant_cols = nunique_per_col[nunique_per_col <= 1].index.tolist()
+        if constant_cols:
+            X_df = X_df.drop(columns=constant_cols)
+
+        print("[ALL DONE] Verarbeitung aller Subjekte abgeschlossen.")
+        return X_df, y_val, y_aro, meta_df
+
+    # -------------------- Optional: Time normalization (wie in VariantB) --------------------
+
+    def _time_normalize_videos(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        WARNUNG: Zeit-Warping kann Signal-Morphologie verändern.
+        Standard: normalize_video_lengths=False.
+        """
+        if "video" not in df.columns:
+            return df
+
+        v = df["video"].to_numpy()
+        t = df["time_s"].to_numpy(dtype=np.float64)
+
+        change = np.r_[True, v[1:] != v[:-1]]
+        block_starts = np.flatnonzero(change)
+        block_ends = np.r_[block_starts[1:], len(v)]
+
+        blocks = []
+        durations = []
+        for s, e in zip(block_starts, block_ends):
+            vid = v[s]
+            if vid == -1 or np.isnan(vid):
+                continue
+            blocks.append((s, e, int(vid)))
+            durations.append(t[e - 1] - t[s])
+
+        if not blocks:
+            return df
+
+        target_len_s = self.target_video_len_s
+        if target_len_s is None:
+            target_len_s = float(np.median(durations)) if len(durations) else durations[0]
+
+        out_rows = []
+        t_cursor = float(t[0])
+
+        num_cols = [c for c in df.columns if c not in ("video",)]
+        for s, e, vid in blocks:
+            seg = df.iloc[s:e].copy()
+            t0 = float(seg["time_s"].iloc[0])
+            seg_t_rel = seg["time_s"].to_numpy(dtype=np.float64) - t0
+
+            fs_block = self._estimate_fs(seg)
+            if fs_block <= 0:
+                fs_block = 20.0
+
+            n_target = max(int(round(target_len_s * fs_block)), 2)
+            new_t_rel = np.linspace(0.0, target_len_s, n_target, dtype=np.float64)
+            new_t_abs = t_cursor + new_t_rel
+
+            resampled = {
+                "time_s": new_t_abs,
+                "video": np.full(n_target, vid, dtype=np.int16),
+            }
+            for c in num_cols:
+                y = seg[c].to_numpy(dtype=np.float64)
+                if seg_t_rel[-1] <= 0:
+                    resampled[c] = np.full(n_target, float(y[-1]) if len(y) else 0.0, dtype=np.float32)
+                else:
+                    resampled[c] = np.interp(new_t_rel, seg_t_rel, y).astype(np.float32)
+
+            out_rows.append(pd.DataFrame(resampled))
+            new_dt = np.median(np.diff(new_t_abs)) if len(new_t_abs) > 1 else 1.0 / fs_block
+            t_cursor = new_t_abs[-1] + new_dt
+
+        out = pd.concat(out_rows, axis=0, ignore_index=True)
+        return out
+
+
+# ----------------------------- Beispiel-Nutzung -----------------------------
+if __name__ == "__main__":
+    base_path = ".."  # anpassen
+
+    prep = CaseDataPreprocessor(
+        base_path=base_path,
+        window_size=20,
+        step_size=10,
+        subjects=list(range(1, 31)),
+        label_shift_s=0.0,
+        use_video_as_feature=False,
+        normalize_video_lengths=False,
+        use_raw=True,
+        add_neurokit_features=True,
+        fillna_value=0.0,
+    )
+
+    print("[INFO] Starte Vorbereitung (Variante A)...")
+    X, yv, ya, meta = prep.prepare_all()
+
+    # ---------- HIER SPEICHERN ----------
+    out_dir = Path("features_case_vA_20w10s")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    X.to_parquet(out_dir / "X.parquet", index=False)
+    yv.rename("label_valence").to_csv(out_dir / "y_valence.csv", index=False)
+    ya.rename("label_arousal").to_csv(out_dir / "y_arousal.csv", index=False)
+    meta.to_csv(out_dir / "meta.csv", index=False)
+
+    combined = pd.concat([meta, yv.rename("label_valence"), ya.rename("label_arousal"), X], axis=1)
+    combined.to_parquet(out_dir / "combined.parquet", index=False)
+
+    print(f"[GESPEICHERT] → {out_dir.resolve()}")
